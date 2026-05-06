@@ -1,5 +1,7 @@
 # Plotter Studio
 
+Bambu Lab 3D printer plotter conversion.
+
 Browser-based pen plotter G-code generator and Bambu Lab printer controller.
 
 ## Run
