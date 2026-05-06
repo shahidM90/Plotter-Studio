@@ -1,0 +1,22 @@
+:root {
+  font: 16px/1.45 system-ui, 'Segoe UI', Roboto, sans-serif;
+  letter-spacing: 0;
+  color: #e5e7eb;
+  background: #10120f;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+#root {
+  min-height: 100svh;
+}
