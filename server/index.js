@@ -3,8 +3,19 @@ import express from 'express';
 import { Client as FTPClient } from 'basic-ftp';
 import mqtt from 'mqtt';
 import { Readable } from 'node:stream';
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const PORT = Number(process.env.PLOTTER_SERVER_PORT || 5426);
+const HOST = process.env.PLOTTER_SERVER_HOST || '127.0.0.1';
+const SHOULD_OPEN_BROWSER = process.env.PLOTTER_OPEN_BROWSER === '1';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const STATIC_DIR = process.env.PLOTTER_STATIC_DIR
+  ? path.resolve(process.env.PLOTTER_STATIC_DIR)
+  : path.resolve(__dirname, '../dist');
 const app = express();
 
 app.use(cors({ origin: [/^http:\/\/127\.0\.0\.1:\d+$/, /^http:\/\/localhost:\d+$/] }));
@@ -456,6 +467,27 @@ app.post('/api/printer/stop', async (request, response) => {
   response.json({ ok: true, message: 'Emergency stop sent: pause, stop, and safe Z lift requested.' });
 });
 
-app.listen(PORT, '127.0.0.1', () => {
-  console.log(`A1 Plotter printer backend listening at http://127.0.0.1:${PORT}`);
+if (existsSync(STATIC_DIR)) {
+  app.use(express.static(STATIC_DIR));
+  app.get(/.*/, (request, response) => {
+    response.sendFile(path.join(STATIC_DIR, 'index.html'));
+  });
+}
+
+function openBrowser(url) {
+  const command = process.platform === 'win32'
+    ? 'cmd'
+    : process.platform === 'darwin'
+      ? 'open'
+      : 'xdg-open';
+  const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url];
+  const child = spawn(command, args, { detached: true, stdio: 'ignore' });
+  child.unref();
+}
+
+app.listen(PORT, HOST, () => {
+  const url = `http://${HOST}:${PORT}`;
+  console.log(`Plotter Studio server listening at ${url}`);
+  if (existsSync(STATIC_DIR)) console.log(`Serving web app from ${STATIC_DIR}`);
+  if (SHOULD_OPEN_BROWSER) openBrowser(url);
 });

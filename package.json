@@ -1,14 +1,31 @@
 {
   "name": "plotter-studio",
-  "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Browser-based pen plotter G-code generator and Bambu Lab printer controller.",
   "type": "module",
+  "bin": {
+    "plotterstudio": "bin/plotterstudio.js",
+    "plotter-studio": "bin/plotterstudio.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "public",
+    "server",
+    "src",
+    "scripts",
+    "index.html",
+    "vite.config.js",
+    "README.md"
+  ],
   "scripts": {
     "dev": "vite",
     "server": "node server/index.js",
+    "start": "node bin/plotterstudio.js server",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "basic-ftp": "^6.0.1",
