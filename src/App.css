@@ -221,6 +221,27 @@ button:hover:not(:disabled),
   background: #14514d;
 }
 
+.subheading {
+  margin: 0;
+  color: #d6f4ee;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.image-vector-preview {
+  overflow: hidden;
+  border: 1px solid rgba(214, 211, 202, 0.16);
+  border-radius: 8px;
+  background: #101416;
+  aspect-ratio: 1;
+}
+
+.image-vector-preview svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 .text-list {
   display: grid;
   gap: 8px;

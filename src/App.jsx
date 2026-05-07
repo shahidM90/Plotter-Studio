@@ -467,6 +467,66 @@ const playbackPathsAtProgress = (paths, progress) => {
 
 const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 
+const simplifyPath = (path, tolerance = 0.002) => {
+  if (path.length <= 2) return path;
+  const simplified = [path[0]];
+  let anchor = path[0];
+  for (let index = 1; index < path.length - 1; index += 1) {
+    const point = path[index];
+    if (distance(anchor, point) >= tolerance) {
+      simplified.push(point);
+      anchor = point;
+    }
+  }
+  simplified.push(path[path.length - 1]);
+  return simplified;
+};
+
+const traceEdgePolylines = (sampleWidth, sampleHeight, isEdge, maxPaths = 4000) => {
+  const keyFor = (x, y) => `${x},${y}`;
+  const edgePixels = new Set();
+  for (let y = 1; y < sampleHeight - 1; y += 1) {
+    for (let x = 1; x < sampleWidth - 1; x += 1) {
+      if (isEdge(x, y)) edgePixels.add(keyFor(x, y));
+    }
+  }
+
+  const visited = new Set();
+  const paths = [];
+  const neighbors = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
+
+  edgePixels.forEach((startKey) => {
+    if (visited.has(startKey) || paths.length >= maxPaths) return;
+    const [startX, startY] = startKey.split(',').map(Number);
+    const stack = [[startX, startY]];
+    const component = [];
+    visited.add(startKey);
+
+    while (stack.length) {
+      const [x, y] = stack.pop();
+      component.push([x, y]);
+      neighbors.forEach(([dx, dy]) => {
+        const nextKey = keyFor(x + dx, y + dy);
+        if (edgePixels.has(nextKey) && !visited.has(nextKey)) {
+          visited.add(nextKey);
+          stack.push([x + dx, y + dy]);
+        }
+      });
+    }
+
+    if (component.length < 3) return;
+    const cx = component.reduce((sum, point) => sum + point[0], 0) / component.length;
+    const cy = component.reduce((sum, point) => sum + point[1], 0) / component.length;
+    const path = component
+      .sort((a, b) => Math.atan2(a[1] - cy, a[0] - cx) - Math.atan2(b[1] - cy, b[0] - cx))
+      .map(([x, y]) => ({ x: x / sampleWidth, y: y / sampleHeight }));
+    if (distance(path[0], path[path.length - 1]) < 0.08) path.push(path[0]);
+    paths.push(simplifyPath(path, 0.003));
+  });
+
+  return paths;
+};
+
 const segmentKey = (a, b, precision = 1) => {
   const p1 = `${a.x.toFixed(precision)},${a.y.toFixed(precision)}`;
   const p2 = `${b.x.toFixed(precision)},${b.y.toFixed(precision)}`;
@@ -633,7 +693,9 @@ function App() {
   const [previewUrl, setPreviewUrl] = useState('');
   const [imageName, setImageName] = useState('');
   const [traceThreshold, setTraceThreshold] = useState(130);
-  const [traceSpacing, setTraceSpacing] = useState(6);
+  const [traceSpacing, setTraceSpacing] = useState(3);
+  const [traceDetail, setTraceDetail] = useState(280);
+  const [traceInvert, setTraceInvert] = useState(false);
   const [traceMode, setTraceMode] = useState('hatching');
   const [svgName, setSvgName] = useState('');
   const [importedSvgPaths, setImportedSvgPaths] = useState([]);
@@ -645,7 +707,7 @@ function App() {
   const [qrPaths, setQrPaths] = useState([]);
   const [patternType, setPatternType] = useState('hatching');
   const [drawPaths, setDrawPaths] = useState([]);
-  const [imagePaths, setImagePaths] = useState([]);
+  const [imageLocalPaths, setImageLocalPaths] = useState([]);
   const [layers, setLayers] = useState([]);
   const [objectVisibility, setObjectVisibility] = useState({
     text: true,
@@ -706,6 +768,12 @@ function App() {
       y: offsetY + point.y * size,
     }, object)));
   }, [object, qrPaths]);
+  const imagePaths = useMemo(() => (
+    imageLocalPaths.map((path) => path.map((point) => transformLocalPoint({
+      x: point.x * object.w,
+      y: point.y * object.h,
+    }, object)))
+  ), [imageLocalPaths, object]);
   const generatedModePaths = useMemo(() => {
     if (mode === 'patterns') {
       if (patternType === 'spiral') return makeSpiralPaths(settings);
@@ -851,10 +919,10 @@ function App() {
     });
   };
 
-  const traceImage = (url, threshold = traceThreshold, spacing = traceSpacing, modeName = traceMode) => {
+  const traceImage = (url, threshold = traceThreshold, spacing = traceSpacing, modeName = traceMode, detail = traceDetail, invert = traceInvert) => {
     const image = new Image();
     image.onload = () => {
-      const sampleWidth = 150;
+      const sampleWidth = detail;
       const sampleHeight = Math.max(1, Math.round((image.height / image.width) * sampleWidth));
       const canvas = document.createElement('canvas');
       canvas.width = sampleWidth;
@@ -865,22 +933,46 @@ function App() {
       const darkAt = (x, y) => {
         const i = (Math.max(0, Math.min(sampleHeight - 1, y)) * sampleWidth + Math.max(0, Math.min(sampleWidth - 1, x))) * 4;
         const luminance = pixels[i] * 0.299 + pixels[i + 1] * 0.587 + pixels[i + 2] * 0.114;
-        return luminance < threshold && pixels[i + 3] > 20;
+        const dark = invert ? luminance > threshold : luminance < threshold;
+        return dark && pixels[i + 3] > 20;
+      };
+      const luminanceAt = (x, y) => {
+        const i = (Math.max(0, Math.min(sampleHeight - 1, y)) * sampleWidth + Math.max(0, Math.min(sampleWidth - 1, x))) * 4;
+        const luminance = pixels[i] * 0.299 + pixels[i + 1] * 0.587 + pixels[i + 2] * 0.114;
+        return invert ? 255 - luminance : luminance;
       };
       const localPaths = [];
-      const step = Math.max(1, Math.round(spacing / Math.max(object.h / sampleHeight, 0.1)));
+      const pixelSizeMm = Math.max(object.h / sampleHeight, 0.03);
+      const step = Math.max(1, Math.round(spacing / pixelSizeMm));
 
       if (modeName === 'stipple') {
         for (let y = 0; y < sampleHeight; y += step) {
           for (let x = 0; x < sampleWidth; x += step) {
-            if (darkAt(x, y)) localPaths.push([{ x: (x / sampleWidth) * object.w, y: (y / sampleHeight) * object.h }, { x: ((x + 0.8) / sampleWidth) * object.w, y: ((y + 0.8) / sampleHeight) * object.h }]);
+            if (darkAt(x, y)) localPaths.push([{ x: x / sampleWidth, y: y / sampleHeight }, { x: (x + 0.8) / sampleWidth, y: (y + 0.8) / sampleHeight }]);
+          }
+        }
+      } else if (modeName === 'connected-outline') {
+        const edgeLimit = Math.max(18, 255 - threshold);
+        localPaths.push(...traceEdgePolylines(sampleWidth, sampleHeight, (x, y) => {
+          const thresholdEdge = darkAt(x, y) && (!darkAt(x + 1, y) || !darkAt(x - 1, y) || !darkAt(x, y + 1) || !darkAt(x, y - 1));
+          const gx = Math.abs(luminanceAt(x + 1, y) - luminanceAt(x - 1, y));
+          const gy = Math.abs(luminanceAt(x, y + 1) - luminanceAt(x, y - 1));
+          return thresholdEdge || gx + gy > edgeLimit;
+        }));
+      } else if (modeName === 'fine-outline') {
+        const edgeLimit = Math.max(18, 255 - threshold);
+        for (let y = 1; y < sampleHeight - 1; y += 1) {
+          for (let x = 1; x < sampleWidth - 1; x += 1) {
+            const gx = Math.abs(luminanceAt(x + 1, y) - luminanceAt(x - 1, y));
+            const gy = Math.abs(luminanceAt(x, y + 1) - luminanceAt(x, y - 1));
+            if (gx + gy > edgeLimit) localPaths.push([{ x: x / sampleWidth, y: y / sampleHeight }, { x: (x + 0.9) / sampleWidth, y: y / sampleHeight }]);
           }
         }
       } else if (modeName === 'outline') {
-        for (let y = 1; y < sampleHeight - 1; y += 2) {
-          for (let x = 1; x < sampleWidth - 1; x += 2) {
+        for (let y = 1; y < sampleHeight - 1; y += 1) {
+          for (let x = 1; x < sampleWidth - 1; x += 1) {
             const edge = darkAt(x, y) && (!darkAt(x + 1, y) || !darkAt(x - 1, y) || !darkAt(x, y + 1) || !darkAt(x, y - 1));
-            if (edge) localPaths.push([{ x: (x / sampleWidth) * object.w, y: (y / sampleHeight) * object.h }, { x: ((x + 1.5) / sampleWidth) * object.w, y: (y / sampleHeight) * object.h }]);
+            if (edge) localPaths.push([{ x: x / sampleWidth, y: y / sampleHeight }, { x: (x + 0.9) / sampleWidth, y: y / sampleHeight }]);
           }
         }
       } else {
@@ -894,8 +986,8 @@ function App() {
               const runEnd = dark ? x : x - 1;
               if (runEnd - runStart > 2) {
                 localPaths.push([
-                  { x: (runStart / sampleWidth) * object.w, y: (y / sampleHeight) * object.h },
-                  { x: (runEnd / sampleWidth) * object.w, y: ((y + (diagonal ? step : 0)) / sampleHeight) * object.h },
+                  { x: runStart / sampleWidth, y: y / sampleHeight },
+                  { x: runEnd / sampleWidth, y: (y + (diagonal ? step : 0)) / sampleHeight },
                 ]);
               }
               runStart = null;
@@ -904,7 +996,7 @@ function App() {
         }
       }
 
-      setImagePaths(localPaths.map((path) => path.map((point) => transformLocalPoint(point, object))));
+      setImageLocalPaths(localPaths);
     };
     image.src = url;
   };
@@ -1143,7 +1235,7 @@ function App() {
     setSelectedTextId('text-1');
     setPreviewUrl('');
     setImageName('');
-    setImagePaths([]);
+    setImageLocalPaths([]);
     setSvgName('');
     setImportedSvgPaths([]);
     setSvgFillPaths([]);
@@ -1164,7 +1256,7 @@ function App() {
     if (key === 'image') {
       setPreviewUrl('');
       setImageName('');
-      setImagePaths([]);
+      setImageLocalPaths([]);
     }
     if (key === 'svg') {
       setSvgName('');
@@ -1182,6 +1274,16 @@ function App() {
     const paths = exportPaths.map((path) => `  <path d="${toPathData(path)}" fill="none" stroke="#111827" stroke-width="0.35"/>`).join('\n');
     const svg = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${settings.bedWidth}mm" height="${settings.bedHeight}mm" viewBox="0 0 ${settings.bedWidth} ${settings.bedHeight}">\n  <rect x="${settings.originX}" y="${settings.originY}" width="${settings.paperWidth}" height="${settings.paperHeight}" fill="white" stroke="#94a3b8" stroke-width="0.5"/>\n${paths}\n</svg>`;
     downloadFile(svg, 'plotter-design.svg', 'image/svg+xml');
+  };
+
+  const exportTracedImageSvg = () => {
+    const paths = imageLocalPaths
+      .map((path) => path.map((point) => ({ x: point.x * object.w, y: point.y * object.h })))
+      .map((path) => `  <path d="${toPathData(path)}" fill="none" stroke="#111827" stroke-width="0.35"/>`)
+      .join('\n');
+    const filename = imageName ? `${imageName.replace(/\.[^.]+$/, '')}-traced.svg` : 'traced-image.svg';
+    const svg = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${object.w}mm" height="${object.h}mm" viewBox="0 0 ${object.w} ${object.h}">\n${paths}\n</svg>`;
+    downloadFile(svg, filename, 'image/svg+xml');
   };
 
   const exportGCode = () => {
@@ -1602,10 +1704,24 @@ function App() {
               </div>
               {photoMode === 'image' && (
                 <>
+                  <h3 className="subheading">Image to SVG</h3>
                   <label className="file-drop"><span>{imageName || 'Upload raster image'}</span><input type="file" accept="image/*" onChange={handleAssetFile} /></label>
-                  <label><span>Mode</span><select value={traceMode} onChange={(event) => { setTraceMode(event.target.value); if (previewUrl) traceImage(previewUrl, traceThreshold, traceSpacing, event.target.value); }}><option value="outline">Outline</option><option value="sketch">Sketch</option><option value="hatching">Hatching</option><option value="stipple">Stipple</option></select></label>
-                  <label><span>Threshold {traceThreshold}</span><input type="range" min="20" max="245" value={traceThreshold} onChange={(event) => { const value = Number(event.target.value); setTraceThreshold(value); if (previewUrl) traceImage(previewUrl, value, traceSpacing, traceMode); }} /></label>
-                  <label><span>Spacing {traceSpacing} mm</span><input type="range" min="2" max="14" value={traceSpacing} onChange={(event) => { const value = Number(event.target.value); setTraceSpacing(value); if (previewUrl) traceImage(previewUrl, traceThreshold, value, traceMode); }} /></label>
+                  <label><span>Mode</span><select value={traceMode} onChange={(event) => { const value = event.target.value; setTraceMode(value); if (previewUrl) traceImage(previewUrl, traceThreshold, traceSpacing, value, traceDetail, traceInvert); }}><option value="connected-outline">Connected outline</option><option value="fine-outline">Fine outline</option><option value="outline">Threshold outline</option><option value="sketch">Sketch</option><option value="hatching">Hatching</option><option value="stipple">Stipple</option></select></label>
+                  <label><span>Threshold {traceThreshold}</span><input type="range" min="20" max="245" value={traceThreshold} onChange={(event) => { const value = Number(event.target.value); setTraceThreshold(value); if (previewUrl) traceImage(previewUrl, value, traceSpacing, traceMode, traceDetail, traceInvert); }} /></label>
+                  <label><span>Spacing {traceSpacing.toFixed(1)} mm</span><input type="range" min="0.2" max="14" step="0.1" value={traceSpacing} onChange={(event) => { const value = Number(event.target.value); setTraceSpacing(value); if (previewUrl) traceImage(previewUrl, traceThreshold, value, traceMode, traceDetail, traceInvert); }} /></label>
+                  <label><span>Detail {traceDetail}px</span><input type="range" min="120" max="900" step="20" value={traceDetail} onChange={(event) => { const value = Number(event.target.value); setTraceDetail(value); if (previewUrl) traceImage(previewUrl, traceThreshold, traceSpacing, traceMode, value, traceInvert); }} /></label>
+                  <label className="toggle-row"><input type="checkbox" checked={traceInvert} onChange={(event) => { const value = event.target.checked; setTraceInvert(value); if (previewUrl) traceImage(previewUrl, traceThreshold, traceSpacing, traceMode, traceDetail, value); }} /><span>Invert image</span></label>
+                  <div className="image-vector-preview">
+                    <svg viewBox="0 0 1 1" preserveAspectRatio="xMidYMid meet">
+                      {previewUrl && <image href={previewUrl} x="0" y="0" width="1" height="1" opacity="0.18" preserveAspectRatio="xMidYMid meet" />}
+                      {imageLocalPaths.slice(0, 6000).map((path, index) => <path key={index} d={toPathData(path)} fill="none" stroke="#67e8f9" strokeWidth="0.003" strokeLinecap="round" strokeLinejoin="round" />)}
+                    </svg>
+                  </div>
+                  <div className="button-row">
+                    <button onClick={() => previewUrl && traceImage(previewUrl, traceThreshold, traceSpacing, traceMode, traceDetail, traceInvert)} disabled={!previewUrl}>Refresh Trace</button>
+                    <button onClick={exportTracedImageSvg} disabled={!imageLocalPaths.length}>Download SVG</button>
+                  </div>
+                  <p className="muted">{imageLocalPaths.length ? `${imageLocalPaths.length} vector strokes generated. Lower spacing and raise detail for finer output.` : 'Upload an image and adjust the sliders until the vector preview looks right.'}</p>
                 </>
               )}
               {photoMode === 'svg' && (
