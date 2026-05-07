@@ -18,6 +18,22 @@
   backdrop-filter: blur(14px);
 }
 
+.brand-menu {
+  position: relative;
+}
+
+.brand-button {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.brand-button:hover {
+  background: transparent;
+}
+
 .brand-mark {
   display: inline-flex;
   align-items: center;
@@ -34,6 +50,36 @@
 .brand-name {
   color: #f8fafc;
   font-weight: 700;
+}
+
+.brand-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 0;
+  z-index: 12;
+  display: grid;
+  gap: 10px;
+  width: min(300px, calc(100vw - 32px));
+  padding: 12px;
+  border: 1px solid rgba(214, 211, 202, 0.18);
+  border-radius: 8px;
+  background: #111410;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.42);
+}
+
+.brand-popover h2,
+.brand-popover p {
+  margin: 0;
+}
+
+.brand-popover h2 {
+  color: #f8fafc;
+  font-size: 1rem;
+}
+
+.brand-popover p {
+  color: #a9a398;
+  font-size: 0.86rem;
 }
 
 .brand-cluster {
@@ -639,6 +685,19 @@ input[type='range'] {
 
 .paper-rect-move {
   cursor: move;
+}
+
+.unreachable-zone rect {
+  fill: rgba(248, 113, 113, 0.26);
+  stroke: rgba(248, 113, 113, 0.72);
+  stroke-width: 0.7;
+}
+
+.unreachable-zone text {
+  fill: #fecaca;
+  font-size: 5px;
+  font-weight: 700;
+  pointer-events: none;
 }
 
 .warning {

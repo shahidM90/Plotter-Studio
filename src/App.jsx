@@ -1,6 +1,7 @@
 import QRCode from 'qrcode';
 import hersheyFonts from 'hersheytext/hersheytext.min.json';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import packageInfo from '../package.json';
 import './App.css';
 
 const PRESETS = {
@@ -131,6 +132,8 @@ const defaultSettings = {
   originY: 20,
   parkX: 0,
   parkY: 256,
+  penTipOffsetX: 0,
+  penTipOffsetY: -30,
   penOffsetX: 0,
   penOffsetY: 0,
   mirrorOutputX: true,
@@ -418,10 +421,35 @@ const applySettings = (paths, settings, { mirrorOutput = true } = {}) => cleanPa
   const x = mirrorOutput && settings.mirrorOutputX ? paperRight - (scaledX - settings.originX) : scaledX;
   const y = mirrorOutput && settings.mirrorOutputY ? paperBottom - (scaledY - settings.originY) : scaledY;
   return {
-    x: x + settings.penOffsetX,
-    y: y + settings.penOffsetY,
+    x,
+    y,
   };
 }));
+
+const penToNozzlePoint = (point, settings) => ({
+  x: point.x - settings.penTipOffsetX + settings.penOffsetX,
+  y: point.y - settings.penTipOffsetY + settings.penOffsetY,
+});
+
+const getReachableBounds = (settings) => ({
+  minX: Math.max(0, settings.penTipOffsetX),
+  minY: Math.max(0, settings.penTipOffsetY),
+  maxX: Math.min(settings.bedWidth, settings.bedWidth + settings.penTipOffsetX),
+  maxY: Math.min(settings.bedHeight, settings.bedHeight + settings.penTipOffsetY),
+});
+
+const clampPaperToReachableArea = (settings) => {
+  const bounds = getReachableBounds(settings);
+  const paperWidth = Math.min(settings.paperWidth, Math.max(1, bounds.maxX - bounds.minX));
+  const paperHeight = Math.min(settings.paperHeight, Math.max(1, bounds.maxY - bounds.minY));
+  return {
+    ...settings,
+    paperWidth,
+    paperHeight,
+    originX: Math.max(bounds.minX, Math.min(bounds.maxX - paperWidth, settings.originX)),
+    originY: Math.max(bounds.minY, Math.min(bounds.maxY - paperHeight, settings.originY)),
+  };
+};
 
 const toPathData = (path) => cleanPaths([path])[0]?.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(' ') || '';
 
@@ -717,11 +745,12 @@ function App() {
     draw: true,
     generated: true,
   });
-  const [settings, setSettings] = useState(defaultSettings);
+  const [settings, setSettings] = useState(() => clampPaperToReachableArea(defaultSettings));
   const [object, setObject] = useState(defaultObject);
   const [printerConfig, setPrinterConfig] = useState(loadPrinterConfig);
   const [printerStatus, setPrinterStatus] = useState({ connected: false, lastReport: null });
   const [printerMessage, setPrinterMessage] = useState('Backend not checked yet.');
+  const [discoveryBusy, setDiscoveryBusy] = useState(false);
   const [preflightMessage, setPreflightMessage] = useState('');
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [printerDetailsOpen, setPrinterDetailsOpen] = useState(true);
@@ -737,6 +766,9 @@ function App() {
   const [preparedJob, setPreparedJob] = useState(null);
   const [mqttViewerOpen, setMqttViewerOpen] = useState(false);
   const [mqttLogEntries, setMqttLogEntries] = useState([]);
+  const [brandMenuOpen, setBrandMenuOpen] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState({ message: '', latestVersion: '', updateAvailable: false });
+  const [updateBusy, setUpdateBusy] = useState(false);
   const [presetMenuOpen, setPresetMenuOpen] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [playbackOpen, setPlaybackOpen] = useState(false);
@@ -749,6 +781,7 @@ function App() {
   const activeDrawPath = useRef(null);
   const activeDrawIndex = useRef(null);
   const drawFrame = useRef(null);
+  const autoDiscoveryTried = useRef(false);
   const selectedText = textItems.find((item) => item.id === selectedTextId) || textItems[0];
   const unsupportedChars = useMemo(() => unsupportedTextChars(textItems), [textItems]);
   const compressedTexts = useMemo(() => compressedTextItems(textItems), [textItems]);
@@ -832,6 +865,10 @@ function App() {
       travelSpeed: settings.travelSpeed,
       parkX: settings.parkX,
       parkY: settings.parkY,
+      penTipOffsetX: settings.penTipOffsetX,
+      penTipOffsetY: settings.penTipOffsetY,
+      penOffsetX: settings.penOffsetX,
+      penOffsetY: settings.penOffsetY,
       mirrorOutputX: settings.mirrorOutputX,
       mirrorOutputY: settings.mirrorOutputY,
     },
@@ -840,12 +877,20 @@ function App() {
     preserveZZero,
     bambuSafetyHeader,
     lineNumbersEnabled,
-  }), [bambuSafetyHeader, exportPaths, homeBeforeDirectSend, lineNumbersEnabled, preserveZZero, settings.feedrate, settings.mirrorOutputX, settings.mirrorOutputY, settings.parkX, settings.parkY, settings.penDownZ, settings.penUpZ, settings.safeZ, settings.travelSpeed, zConfirmed]);
+  }), [bambuSafetyHeader, exportPaths, homeBeforeDirectSend, lineNumbersEnabled, preserveZZero, settings.feedrate, settings.mirrorOutputX, settings.mirrorOutputY, settings.parkX, settings.parkY, settings.penDownZ, settings.penOffsetX, settings.penOffsetY, settings.penTipOffsetX, settings.penTipOffsetY, settings.penUpZ, settings.safeZ, settings.travelSpeed, zConfirmed]);
   const preparedJobIsFresh = preparedJob?.signature === sliceSignature;
+  const unreachableZones = useMemo(() => {
+    const zones = [];
+    if (settings.penTipOffsetX > 0) zones.push({ x: 0, y: 0, width: settings.penTipOffsetX, height: settings.bedHeight });
+    if (settings.penTipOffsetX < 0) zones.push({ x: settings.bedWidth + settings.penTipOffsetX, y: 0, width: Math.abs(settings.penTipOffsetX), height: settings.bedHeight });
+    if (settings.penTipOffsetY > 0) zones.push({ x: 0, y: 0, width: settings.bedWidth, height: settings.penTipOffsetY });
+    if (settings.penTipOffsetY < 0) zones.push({ x: 0, y: settings.bedHeight + settings.penTipOffsetY, width: settings.bedWidth, height: Math.abs(settings.penTipOffsetY) });
+    return zones.filter((zone) => zone.width > 0 && zone.height > 0);
+  }, [settings.bedHeight, settings.bedWidth, settings.penTipOffsetX, settings.penTipOffsetY]);
 
   const handlePresetChange = (presetKey) => {
     const preset = PRESETS[presetKey];
-    setSettings((current) => ({
+    setSettings((current) => clampPaperToReachableArea({
       ...current,
       preset: presetKey,
       bedWidth: preset.bedWidth,
@@ -859,7 +904,7 @@ function App() {
   };
 
   const handleSettingChange = (key, value) => {
-    setSettings((current) => ({
+    setSettings((current) => clampPaperToReachableArea({
       ...current,
       preset: ['bedWidth', 'bedHeight'].includes(key) ? 'custom' : current.preset,
       [key]: value,
@@ -1170,8 +1215,12 @@ function App() {
     if (dragMode.current === 'paper') {
       const dx = point.x - start.x;
       const dy = point.y - start.y;
-      const originX = Math.max(0, Math.min(start.settings.bedWidth - start.settings.paperWidth, start.settings.originX + dx));
-      const originY = Math.max(0, Math.min(start.settings.bedHeight - start.settings.paperHeight, start.settings.originY + dy));
+      const nextSettings = clampPaperToReachableArea({
+        ...start.settings,
+        originX: start.settings.originX + dx,
+        originY: start.settings.originY + dy,
+      });
+      const { originX, originY } = nextSettings;
       const clampedDx = originX - start.settings.originX;
       const clampedDy = originY - start.settings.originY;
       setSettings((current) => ({ ...current, originX, originY }));
@@ -1324,7 +1373,8 @@ function App() {
     gcode += '; PEN PLOTTER MODE - NO FILAMENT EXTRUSION\n';
     gcode += `; Printer: ${PRESETS[jobSettings.preset]?.label || 'Custom'}\n`;
     gcode += `; Bed Size: ${jobSettings.bedWidth} x ${jobSettings.bedHeight}mm\n`;
-    gcode += `; Offset Compensation: X=${jobSettings.penOffsetX}mm, Y=${jobSettings.penOffsetY}mm\n`;
+    gcode += `; Pen Tip Offset From Nozzle: X=${jobSettings.penTipOffsetX}mm, Y=${jobSettings.penTipOffsetY}mm\n`;
+    gcode += `; Fine Offset Compensation: X=${jobSettings.penOffsetX}mm, Y=${jobSettings.penOffsetY}mm\n`;
     gcode += '; WARNING: Manually verify pen mounting, paper hold-down, and Z height before running.\n';
     gcode += '; No extrusion moves are generated.\n';
     gcode += `; Z-Draw (pen down): ${jobSettings.penDownZ.toFixed(2)}mm\n`;
@@ -1373,11 +1423,12 @@ function App() {
       });
     }
     paths.forEach((path, pathIndex) => {
+      const nozzlePath = path.map((point) => penToNozzlePoint(point, jobSettings));
       gcode += `\n; Optimized path ${pathIndex + 1}\n`;
       gcode += `G0 Z${jobSettings.penUpZ.toFixed(2)} F${jobSettings.travelSpeed}\n`;
-      gcode += `G0 X${path[0].x.toFixed(2)} Y${path[0].y.toFixed(2)} F${jobSettings.travelSpeed}\n`;
+      gcode += `G0 X${nozzlePath[0].x.toFixed(2)} Y${nozzlePath[0].y.toFixed(2)} F${jobSettings.travelSpeed}\n`;
       gcode += `G1 Z${jobSettings.penDownZ.toFixed(2)} F${jobSettings.feedrate}\n`;
-      path.slice(1).forEach((point) => {
+      nozzlePath.slice(1).forEach((point) => {
         gcode += `G1 X${point.x.toFixed(2)} Y${point.y.toFixed(2)} F${jobSettings.feedrate}\n`;
       });
       gcode += `G0 Z${jobSettings.penUpZ.toFixed(2)} F${jobSettings.travelSpeed}\n`;
@@ -1438,6 +1489,32 @@ function App() {
   const connectPrinter = async () => {
     const data = await callPrinterApi('/api/printer/connect', printerConfig);
     if (data) setTimeout(refreshPrinterStatus, 900);
+  };
+
+  const discoverPrinters = async ({ quiet = false } = {}) => {
+    if (!printerConfig.accessCode && !quiet) {
+      setPrinterMessage('Enter your LAN access code first, then discover printers.');
+      return null;
+    }
+    setDiscoveryBusy(true);
+    if (!quiet) setPrinterMessage('Searching for Bambu printers on your network...');
+    const data = await callPrinterApi('/api/printer/discover', {
+      serial: printerConfig.serial,
+      accessCode: printerConfig.accessCode,
+      autoConnect: true,
+    });
+    setDiscoveryBusy(false);
+    const discovered = data?.connectedPrinter || data?.selectedPrinter;
+    if (discovered) {
+      updatePrinterConfig({
+        host: discovered.host,
+        serial: discovered.serial || printerConfig.serial,
+      });
+    }
+    if (data?.connectedPrinter) {
+      setTimeout(refreshPrinterStatus, 900);
+    }
+    return data;
   };
 
   const disconnectPrinter = async () => {
@@ -1517,12 +1594,115 @@ function App() {
     setMqttLogEntries([]);
   };
 
+  const checkForUpdates = async () => {
+    setUpdateBusy(true);
+    setUpdateStatus((current) => ({ ...current, message: 'Checking GitHub...' }));
+    try {
+      const response = await fetch(`${PRINTER_API}/api/app/check-update`);
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Update check failed.');
+      setUpdateStatus({
+        latestVersion: data.latestVersion,
+        updateAvailable: data.updateAvailable,
+        message: data.updateAvailable
+          ? `Update available: v${data.latestVersion}`
+          : `You are up to date at v${data.currentVersion}.`,
+      });
+    } catch (error) {
+      setUpdateStatus({ latestVersion: '', updateAvailable: false, message: error.message });
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  const updateApp = async () => {
+    setUpdateBusy(true);
+    setUpdateStatus((current) => ({ ...current, message: 'Installing update...' }));
+    try {
+      const response = await fetch(`${PRINTER_API}/api/app/update`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Update failed.');
+      setUpdateStatus({
+        latestVersion: data.latestVersion,
+        updateAvailable: false,
+        message: data.message || 'Updated. Restarting Plotter Studio...',
+      });
+    } catch (error) {
+      setUpdateStatus((current) => ({ ...current, message: error.message }));
+      setUpdateBusy(false);
+    }
+  };
+
   useEffect(() => {
     if (!mqttViewerOpen) return undefined;
     refreshMqttLog({ reset: true });
     const interval = window.setInterval(() => refreshMqttLog(), 1000);
     return () => window.clearInterval(interval);
   }, [mqttViewerOpen, refreshMqttLog]);
+
+  useEffect(() => {
+    if (autoDiscoveryTried.current || printerStatus.connected) return;
+    if (!printerConfig.serial || !printerConfig.accessCode) return;
+    autoDiscoveryTried.current = true;
+    let cancelled = false;
+    const run = async () => {
+      setDiscoveryBusy(true);
+      try {
+        const response = await fetch(`${PRINTER_API}/api/printer/discover`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serial: printerConfig.serial, accessCode: printerConfig.accessCode, autoConnect: true }),
+        });
+        const data = await response.json();
+        if (cancelled) return;
+        if (!response.ok || !data.ok) throw new Error(data.error || 'Printer discovery failed.');
+        setPrinterMessage(data.message || 'Printer discovery finished.');
+        const discovered = data.connectedPrinter || data.selectedPrinter;
+        if (discovered) {
+          updatePrinterConfig({
+            host: discovered.host,
+            serial: discovered.serial || printerConfig.serial,
+          });
+        }
+        if (data.connectedPrinter) {
+          setTimeout(async () => {
+            const statusResponse = await fetch(`${PRINTER_API}/api/printer/status`);
+            const statusData = await statusResponse.json();
+            if (statusData.ok) {
+              setPrinterStatus(statusData);
+              setPrinterMessage(statusData.connected ? 'Printer connected.' : (statusData.lastError || 'Printer not connected.'));
+              if (statusData.connected) setPrinterDetailsOpen(false);
+            }
+          }, 900);
+        }
+      } catch (error) {
+        if (!cancelled) setPrinterMessage(error.message);
+      } finally {
+        if (!cancelled) setDiscoveryBusy(false);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [printerConfig.accessCode, printerConfig.serial, printerStatus.connected]);
+
+  useEffect(() => {
+    setSettings((current) => {
+      const clamped = clampPaperToReachableArea(current);
+      if (
+        clamped.originX === current.originX
+        && clamped.originY === current.originY
+        && clamped.paperWidth === current.paperWidth
+        && clamped.paperHeight === current.paperHeight
+      ) return current;
+      return clamped;
+    });
+  }, [settings.bedHeight, settings.bedWidth, settings.originX, settings.originY, settings.paperHeight, settings.paperWidth, settings.penTipOffsetX, settings.penTipOffsetY]);
 
   useEffect(() => {
     if (!mqttViewerOpen || !mqttLogRef.current) return;
@@ -1548,7 +1728,22 @@ function App() {
     <main className="app-shell">
       <header className="topbar">
         <div className="brand-cluster">
-          <div><span className="brand-mark">3D</span><span className="brand-name">Plotter studio</span></div>
+          <div className="brand-menu">
+            <button className="brand-button" onClick={() => setBrandMenuOpen((open) => !open)}>
+              <span className="brand-mark">3D</span><span className="brand-name">Plotter studio</span>
+            </button>
+            {brandMenuOpen && (
+              <div className="brand-popover">
+                <div>
+                  <h2>Plotter studio</h2>
+                  <p>Version {packageInfo.version}</p>
+                </div>
+                <button onClick={checkForUpdates} disabled={updateBusy}>{updateBusy ? 'Checking...' : 'Check for updates'}</button>
+                <button className="primary-action" onClick={updateApp} disabled={updateBusy || !updateStatus.updateAvailable}>Update automatically</button>
+                {updateStatus.message && <p className="status-line">{updateStatus.message}</p>}
+              </div>
+            )}
+          </div>
           <div className="preset-menu">
             <button onClick={() => setPresetMenuOpen((open) => !open)}>{PRESETS[settings.preset].label}</button>
             {presetMenuOpen && (
@@ -1809,6 +2004,16 @@ function App() {
             <rect width={settings.bedWidth} height={settings.bedHeight} rx="4" fill="url(#plate-texture)" opacity="0.95" />
             <rect width={settings.bedWidth} height={settings.bedHeight} rx="4" fill="url(#plate-grid)" />
             <rect width={settings.bedWidth} height={settings.bedHeight} rx="4" fill="url(#plate-grid-major)" />
+            {unreachableZones.map((zone, index) => (
+              <g key={`unreachable-${index}`} className="unreachable-zone">
+                <rect x={zone.x} y={zone.y} width={zone.width} height={zone.height} />
+                {zone.width > 14 && zone.height > 14 && (
+                  <text x={zone.x + zone.width / 2} y={zone.y + zone.height / 2} textAnchor="middle" dominantBaseline="middle">
+                    Pen unreachable
+                  </text>
+                )}
+              </g>
+            ))}
             <line x1={settings.bedWidth / 2} y1="8" x2={settings.bedWidth / 2} y2={settings.bedHeight - 8} stroke="#14b8a6" strokeWidth="0.55" opacity="0.85" />
             <line x1="8" y1={settings.bedHeight / 2} x2={settings.bedWidth - 8} y2={settings.bedHeight / 2} stroke="#14b8a6" strokeWidth="0.55" opacity="0.85" />
             <circle cx={settings.bedWidth / 2} cy={settings.bedHeight / 2} r="5" fill="none" stroke="#14b8a6" strokeWidth="0.55" opacity="0.9" />
@@ -1818,8 +2023,6 @@ function App() {
             {[50, 100, 150, 200, 250].filter((tick) => tick <= settings.bedHeight).map((tick) => (
               <text key={`y-${tick}`} x="9" y={tick + 1.5} fill="#c9d2d5" fontSize="5" textAnchor="middle">{tick}</text>
             ))}
-            <text x={settings.bedWidth / 2} y={settings.bedHeight - 13} fill="#d9e2e4" fontSize="8" fontWeight="700" textAnchor="middle">Bambu Lab A1 Build Plate</text>
-            <text x={settings.bedWidth / 2} y={settings.bedHeight - 5} fill="#8a969a" fontSize="4.5" textAnchor="middle">256 x 256 mm textured PEI reference</text>
             <rect data-paper="true" x={settings.originX} y={settings.originY} width={settings.paperWidth} height={settings.paperHeight} fill="#fbfbf7" fillOpacity="0.92" stroke="#14b8a6" strokeWidth="0.9" strokeDasharray="3 2" className={presetMenuOpen ? 'paper-rect paper-rect-move' : 'paper-rect'} />
             {previewUrl && mode === 'photos' && photoMode === 'image' && <image href={previewUrl} x={object.x} y={object.y} width={object.w} height={object.h} opacity="0.16" preserveAspectRatio="xMidYMid meet" />}
             {enabledLayers.length > 0
@@ -1862,6 +2065,7 @@ function App() {
                 <label><span>Printer IP</span><input value={printerConfig.host} onChange={(event) => updatePrinterConfig({ host: event.target.value })} placeholder="192.168.1.42" /></label>
                 <label><span>Serial / Device ID</span><input value={printerConfig.serial} onChange={(event) => updatePrinterConfig({ serial: event.target.value })} placeholder="00M..." /></label>
                 <label><span>LAN Access Code</span><input type="password" value={printerConfig.accessCode} onChange={(event) => updatePrinterConfig({ accessCode: event.target.value })} placeholder="8-character code" /></label>
+                <button onClick={() => discoverPrinters()} disabled={discoveryBusy}>{discoveryBusy ? 'Discovering...' : 'Discover Printers'}</button>
                 <button onClick={forgetPrinterConfig}>Forget Saved Printer</button>
               </div>
             )}
@@ -1892,6 +2096,7 @@ function App() {
             {advancedOpen && (
               <>
                 <button onClick={toggleToolheadFan} disabled={!printerStatus.connected}>{toolheadFanOn ? 'Turn Toolhead Fan Off' : 'Turn Toolhead Fan On'}</button>
+                <button onClick={() => callPrinterApi('/api/printer/release-motors', {})} disabled={!printerStatus.connected}>Release Motors</button>
               </>
             )}
             <label className="toggle-row"><input type="checkbox" checked={sendConfirmed} onChange={(event) => setSendConfirmed(event.target.checked)} /><span>I verified pen mount, paper, path bounds, and Z height</span></label>
@@ -1927,8 +2132,10 @@ function App() {
                   <NumberInput label="Travel" value={settings.travelSpeed} onChange={(value) => handleSettingChange('travelSpeed', value)} />
                   <NumberInput label="Origin X" value={settings.originX} onChange={(value) => handleSettingChange('originX', value)} />
                   <NumberInput label="Origin Y" value={settings.originY} onChange={(value) => handleSettingChange('originY', value)} />
-                  <NumberInput label="Pen off X" step="0.1" value={settings.penOffsetX} onChange={(value) => handleSettingChange('penOffsetX', value)} />
-                  <NumberInput label="Pen off Y" step="0.1" value={settings.penOffsetY} onChange={(value) => handleSettingChange('penOffsetY', value)} />
+                  <NumberInput label="Tip off X" step="0.1" value={settings.penTipOffsetX} onChange={(value) => handleSettingChange('penTipOffsetX', value)} />
+                  <NumberInput label="Tip off Y" step="0.1" value={settings.penTipOffsetY} onChange={(value) => handleSettingChange('penTipOffsetY', value)} />
+                  <NumberInput label="Fine off X" step="0.1" value={settings.penOffsetX} onChange={(value) => handleSettingChange('penOffsetX', value)} />
+                  <NumberInput label="Fine off Y" step="0.1" value={settings.penOffsetY} onChange={(value) => handleSettingChange('penOffsetY', value)} />
                   <NumberInput label="Park X" value={settings.parkX} onChange={(value) => handleSettingChange('parkX', value)} />
                   <NumberInput label="Park Y" value={settings.parkY} onChange={(value) => handleSettingChange('parkY', value)} />
                 </div>

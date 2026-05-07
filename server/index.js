@@ -4,7 +4,8 @@ import { Client as FTPClient } from 'basic-ftp';
 import mqtt from 'mqtt';
 import { Readable } from 'node:stream';
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import dgram from 'node:dgram';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -16,6 +17,9 @@ const __dirname = path.dirname(__filename);
 const STATIC_DIR = process.env.PLOTTER_STATIC_DIR
   ? path.resolve(process.env.PLOTTER_STATIC_DIR)
   : path.resolve(__dirname, '../dist');
+const PACKAGE_INFO = JSON.parse(readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
+const GITHUB_PACKAGE_URL = 'https://raw.githubusercontent.com/shahidM90/Plotter-Studio/main/package.json';
+const GITHUB_INSTALL_SPEC = 'git+https://github.com/shahidM90/Plotter-Studio.git';
 const app = express();
 
 app.use(cors({ origin: [/^http:\/\/127\.0\.0\.1:\d+$/, /^http:\/\/localhost:\d+$/] }));
@@ -32,6 +36,40 @@ let lastSafeZ = 10;
 let mqttLogSequence = 0;
 let toolheadFanKeepalive = null;
 const mqttLog = [];
+
+function compareVersions(a, b) {
+  const left = String(a).split('.').map((part) => Number(part) || 0);
+  const right = String(b).split('.').map((part) => Number(part) || 0);
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    if ((left[index] || 0) > (right[index] || 0)) return 1;
+    if ((left[index] || 0) < (right[index] || 0)) return -1;
+  }
+  return 0;
+}
+
+async function getLatestPackageInfo() {
+  const response = await fetch(`${GITHUB_PACKAGE_URL}?t=${Date.now()}`, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`GitHub returned HTTP ${response.status}`);
+  return response.json();
+}
+
+function runNpmInstallUpdate() {
+  const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  return new Promise((resolve, reject) => {
+    const child = spawn(npmCommand, ['install', '-g', GITHUB_INSTALL_SPEC, '--install-links'], {
+      shell: false,
+      windowsHide: true,
+    });
+    let output = '';
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve(output.trim());
+      else reject(new Error(output.trim() || `npm install exited with code ${code}`));
+    });
+  });
+}
 
 const blockedPatterns = [
   /^M109\b/i,
@@ -145,6 +183,73 @@ function addMqttLog(direction, topic, payload) {
   if (mqttLog.length > 250) mqttLog.splice(0, mqttLog.length - 250);
 }
 
+function parseSsdpPrinterMessage(raw, rinfo) {
+  if (!/bambu|3dprinter/i.test(raw)) return null;
+  const headers = {};
+  raw.split(/\r?\n/).forEach((line) => {
+    const index = line.indexOf(':');
+    if (index > 0) headers[line.slice(0, index).trim().toLowerCase()] = line.slice(index + 1).trim();
+  });
+  const usn = headers.usn || headers['dev-id.bambu.com'] || headers['dev_id.bambu.com'] || '';
+  const serialMatch = usn.match(/[A-Z0-9]{8,}/i);
+  return {
+    host: rinfo.address,
+    serial: headers['dev-id.bambu.com'] || headers['dev_id.bambu.com'] || serialMatch?.[0] || '',
+    name: headers['dev-name.bambu.com'] || headers['dev_name.bambu.com'] || headers.server || 'Bambu printer',
+    model: headers['dev-model.bambu.com'] || headers['dev_model.bambu.com'] || '',
+    raw: Object.fromEntries(Object.entries(headers).filter(([key]) => key.includes('bambu') || ['usn', 'server', 'location'].includes(key))),
+  };
+}
+
+async function discoverBambuPrinters(timeoutMs = 5000) {
+  const found = new Map();
+  const sockets = [];
+  const addPrinter = (printer) => {
+    if (!printer?.host) return;
+    const key = printer.serial || printer.host;
+    found.set(key, { ...found.get(key), ...printer });
+  };
+
+  await Promise.all([1900, 2021].map((port) => new Promise((resolve) => {
+    const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+    sockets.push(socket);
+    socket.on('message', (message, rinfo) => addPrinter(parseSsdpPrinterMessage(message.toString(), rinfo)));
+    socket.on('error', () => resolve());
+    socket.bind(port, '0.0.0.0', () => {
+      try {
+        socket.addMembership('239.255.255.250');
+      } catch {
+        // Another process may already own membership; direct replies still work.
+      }
+      resolve();
+    });
+  })));
+
+  const searchSocket = dgram.createSocket('udp4');
+  sockets.push(searchSocket);
+  const search = [
+    'M-SEARCH * HTTP/1.1',
+    'HOST: 239.255.255.250:1900',
+    'MAN: "ssdp:discover"',
+    'MX: 2',
+    'ST: urn:bambulab-com:device:3dprinter:1',
+    '',
+    '',
+  ].join('\r\n');
+  searchSocket.on('message', (message, rinfo) => addPrinter(parseSsdpPrinterMessage(message.toString(), rinfo)));
+  searchSocket.bind(0, () => {
+    searchSocket.setMulticastTTL(2);
+    const payload = Buffer.from(search);
+    [1900, 2021].forEach((port) => searchSocket.send(payload, port, '239.255.255.250'));
+  });
+
+  await sleep(timeoutMs);
+  sockets.forEach((socket) => {
+    try { socket.close(); } catch { /* closed already */ }
+  });
+  return [...found.values()].sort((a, b) => `${a.name}${a.host}`.localeCompare(`${b.name}${b.host}`));
+}
+
 function publish(payload, qos = 0) {
   return new Promise((resolve, reject) => {
     const topic = requestTopic();
@@ -153,6 +258,48 @@ function publish(payload, qos = 0) {
       if (error) reject(error);
       else resolve();
     });
+  });
+}
+
+function startPrinterConnection({ host, serial, accessCode }) {
+  if (client) client.end(true);
+  stopToolheadFanKeepalive();
+  config = { host, serial, accessCode };
+  connected = false;
+  lastError = '';
+  lastReport = null;
+
+  client = mqtt.connect(`mqtts://${host}:8883`, {
+    username: 'bblp',
+    password: accessCode,
+    clientId: `plotter_studio_${Date.now()}`,
+    rejectUnauthorized: false,
+    connectTimeout: 8000,
+    reconnectPeriod: 3000,
+  });
+
+  client.on('connect', () => {
+    connected = true;
+    client.subscribe(reportTopic());
+  });
+
+  client.on('message', (topic, message) => {
+    if (topic !== reportTopic()) return;
+    try {
+      lastReport = JSON.parse(message.toString());
+      addMqttLog('in', topic, lastReport);
+    } catch {
+      lastReport = { raw: message.toString() };
+      addMqttLog('in', topic, lastReport);
+    }
+  });
+
+  client.on('error', (error) => {
+    lastError = error.message;
+  });
+
+  client.on('close', () => {
+    connected = false;
   });
 }
 
@@ -256,6 +403,52 @@ async function emergencyStopPlot() {
   await sendGCode(`M400\nG0 Z${lastSafeZ.toFixed(2)} F3000\nM400`);
 }
 
+app.get('/api/app/version', (request, response) => {
+  response.json({ ok: true, version: PACKAGE_INFO.version, name: PACKAGE_INFO.name });
+});
+
+app.get('/api/app/check-update', async (request, response) => {
+  try {
+    const latest = await getLatestPackageInfo();
+    response.json({
+      ok: true,
+      currentVersion: PACKAGE_INFO.version,
+      latestVersion: latest.version,
+      updateAvailable: compareVersions(latest.version, PACKAGE_INFO.version) > 0,
+    });
+  } catch (error) {
+    response.status(502).json({ ok: false, error: `Could not check GitHub for updates: ${error.message}` });
+  }
+});
+
+app.post('/api/app/update', async (request, response) => {
+  try {
+    const latest = await getLatestPackageInfo();
+    const updateAvailable = compareVersions(latest.version, PACKAGE_INFO.version) > 0;
+    if (!updateAvailable && !request.body?.force) {
+      response.json({
+        ok: true,
+        message: `Plotter Studio is already up to date at v${PACKAGE_INFO.version}.`,
+        currentVersion: PACKAGE_INFO.version,
+        latestVersion: latest.version,
+      });
+      return;
+    }
+
+    await runNpmInstallUpdate();
+    response.json({
+      ok: true,
+      message: `Updated to v${latest.version}. Restarting Plotter Studio...`,
+      currentVersion: PACKAGE_INFO.version,
+      latestVersion: latest.version,
+      restarting: true,
+    });
+    restartAfterUpdate();
+  } catch (error) {
+    response.status(500).json({ ok: false, error: `Update failed: ${error.message}` });
+  }
+});
+
 app.get('/api/printer/status', (request, response) => {
   response.json({
     ok: true,
@@ -287,47 +480,48 @@ app.post('/api/printer/connect', (request, response) => {
     return;
   }
 
-  if (client) client.end(true);
-  stopToolheadFanKeepalive();
-  config = { host, serial, accessCode };
-  connected = false;
-  lastError = '';
-  lastReport = null;
-
-  client = mqtt.connect(`mqtts://${host}:8883`, {
-    username: 'bblp',
-    password: accessCode,
-    clientId: `a1_plotter_${Date.now()}`,
-    rejectUnauthorized: false,
-    connectTimeout: 8000,
-    reconnectPeriod: 3000,
-  });
-
-  client.on('connect', () => {
-    connected = true;
-    client.subscribe(reportTopic());
-  });
-
-  client.on('message', (topic, message) => {
-    if (topic !== reportTopic()) return;
-    try {
-      lastReport = JSON.parse(message.toString());
-      addMqttLog('in', topic, lastReport);
-    } catch {
-      lastReport = { raw: message.toString() };
-      addMqttLog('in', topic, lastReport);
-    }
-  });
-
-  client.on('error', (error) => {
-    lastError = error.message;
-  });
-
-  client.on('close', () => {
-    connected = false;
-  });
-
+  startPrinterConnection({ host, serial, accessCode });
   response.json({ ok: true, message: 'Connection started. Check status for live connection state.' });
+});
+
+app.post('/api/printer/discover', async (request, response) => {
+  const { serial = '', accessCode = '', autoConnect = true } = request.body || {};
+  const printers = await discoverBambuPrinters();
+  const normalizedSerial = String(serial).trim().toLowerCase();
+  const serialMatch = normalizedSerial
+    ? printers.find((printer) => String(printer.serial || '').toLowerCase() === normalizedSerial)
+    : null;
+  const matched = serialMatch || (printers.length === 1 ? printers[0] : null);
+
+  if (autoConnect && matched && accessCode) {
+    const connectionSerial = matched.serial || serial;
+    if (!connectionSerial) {
+      response.json({
+        ok: true,
+        printers,
+        selectedPrinter: { host: matched.host, serial: matched.serial || '', name: matched.name, model: matched.model },
+        message: `Found ${matched.name || 'Bambu printer'} at ${matched.host}, but no serial was discovered. Enter the serial once, then connect.`,
+      });
+      return;
+    }
+    startPrinterConnection({ host: matched.host, serial: connectionSerial, accessCode });
+    response.json({
+      ok: true,
+      printers,
+      connectedPrinter: { host: matched.host, serial: connectionSerial, name: matched.name, model: matched.model },
+      message: `Found ${matched.name || 'Bambu printer'} at ${matched.host}. Connection started with saved access code.`,
+    });
+    return;
+  }
+
+  response.json({
+    ok: true,
+    printers,
+    selectedPrinter: matched ? { host: matched.host, serial: matched.serial || '', name: matched.name, model: matched.model } : null,
+    message: printers.length
+      ? `Found ${printers.length} Bambu printer${printers.length === 1 ? '' : 's'}.`
+      : 'No Bambu printers found on this network.',
+  });
 });
 
 app.post('/api/printer/disconnect', (request, response) => {
@@ -447,6 +641,25 @@ app.post('/api/printer/home', async (request, response) => {
   response.json({ ok: true });
 });
 
+app.post('/api/printer/release-motors', async (request, response) => {
+  if (!requireConnected(response)) return;
+  const gcode = [
+    '; Plotter Studio motor release',
+    'G90',
+    'M400',
+    'M18 X Y Z',
+    'M84 X Y Z',
+    'M84',
+    'M400',
+    '',
+  ].join('\n');
+  const filename = `plotter_release_motors_${Date.now()}.gcode`;
+  await uploadGCodeFile(gcode, filename);
+  await sleep(500);
+  await startGCodeFile(filename);
+  response.json({ ok: true, message: `Motor release file started: cache/${filename}.` });
+});
+
 app.post('/api/printer/pause', async (request, response) => {
   if (!requireConnected(response)) return;
   if (activeStream) activeStream.paused = true;
@@ -483,6 +696,16 @@ function openBrowser(url) {
   const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url];
   const child = spawn(command, args, { detached: true, stdio: 'ignore' });
   child.unref();
+}
+
+function restartAfterUpdate() {
+  const command = process.platform === 'win32' ? 'cmd' : 'sh';
+  const args = process.platform === 'win32'
+    ? ['/c', 'timeout /t 2 /nobreak >nul & plotterstudio server']
+    : ['-c', 'sleep 2; plotterstudio server'];
+  const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true });
+  child.unref();
+  setTimeout(() => process.exit(0), 500);
 }
 
 app.listen(PORT, HOST, () => {
