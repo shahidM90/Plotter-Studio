@@ -641,6 +641,7 @@ function App() {
   const [fillHoles, setFillHoles] = useState(false);
   const [qrText, setQrText] = useState('https://example.com');
   const [qrStyle, setQrStyle] = useState('dots');
+  const [qrFilled, setQrFilled] = useState(false);
   const [qrPaths, setQrPaths] = useState([]);
   const [patternType, setPatternType] = useState('hatching');
   const [drawPaths, setDrawPaths] = useState([]);
@@ -982,6 +983,12 @@ function App() {
     const size = qr.modules.size;
     const moduleSize = 1 / size;
     const paths = [];
+    const fillModule = (x, y) => {
+      const fillLines = qrStyle === 'rounded'
+        ? ['0.32,0.24 0.68,0.24', '0.22,0.38 0.78,0.38', '0.2,0.5 0.8,0.5', '0.22,0.62 0.78,0.62', '0.32,0.76 0.68,0.76']
+        : ['0,0.18 1,0.18', '0,0.34 1,0.34', '0,0.5 1,0.5', '0,0.66 1,0.66', '0,0.82 1,0.82'];
+      fillLines.forEach((line) => paths.push(parseStroke(line, x, y, moduleSize, moduleSize)));
+    };
     for (let row = 0; row < size; row += 1) {
       for (let col = 0; col < size; col += 1) {
         if (!qr.modules.get(row, col)) continue;
@@ -991,8 +998,10 @@ function App() {
           paths.push(parseStroke('0.2,0.5 0.8,0.5', x, y, moduleSize, moduleSize));
         } else if (qrStyle === 'rounded') {
           paths.push(parseStroke('0.2,0.2 0.8,0.2 0.8,0.8 0.2,0.8 0.2,0.2', x, y, moduleSize, moduleSize));
+          if (qrFilled) fillModule(x, y);
         } else {
           paths.push(parseStroke('0,0 1,0 1,1 0,1 0,0', x, y, moduleSize, moduleSize));
+          if (qrFilled) fillModule(x, y);
         }
       }
     }
@@ -1614,6 +1623,11 @@ function App() {
               <h2>QR Code</h2>
               <label><span>Content</span><input value={qrText} onChange={(event) => setQrText(event.target.value)} /></label>
               <label><span>Style</span><select value={qrStyle} onChange={(event) => setQrStyle(event.target.value)}><option value="square">Square</option><option value="rounded">Rounded outline</option><option value="dots">Dots</option></select></label>
+              {qrStyle !== 'dots' && (
+                <button className={qrFilled ? 'active-toggle' : ''} onClick={() => setQrFilled((filled) => !filled)}>
+                  {qrFilled ? 'Filled modules on' : 'Fill modules'}
+                </button>
+              )}
               <button onClick={generateQr}>Generate QR Paths</button>
             </div>
           )}
