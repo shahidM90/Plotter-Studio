@@ -22,7 +22,7 @@ This installs dependencies, builds the web app, and creates a `Plotter Studio` d
 ## Install From GitHub
 
 ```bash
-npm install -g git+https://github.com/shahidM90/Plotter-Studio.git
+npm install -g git+https://github.com/shahidM90/Plotter-Studio.git --install-links
 plotterstudio server
 ```
 
