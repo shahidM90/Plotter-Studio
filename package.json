@@ -34,9 +34,7 @@
     "mqtt": "^5.15.1",
     "qrcode": "^1.5.4",
     "react": "^19.2.5",
-    "react-dom": "^19.2.5",
-    "three": "^0.184.0",
-    "three-stdlib": "^2.36.1"
+    "react-dom": "^19.2.5"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
