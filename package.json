@@ -1,6 +1,6 @@
 {
   "name": "plotter-studio",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Browser-based pen plotter G-code generator and Bambu Lab printer controller.",
   "type": "module",
   "bin": {
