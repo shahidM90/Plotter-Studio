@@ -57,7 +57,7 @@ function runNpmInstallUpdate() {
   const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   return new Promise((resolve, reject) => {
     const child = spawn(npmCommand, ['install', '-g', GITHUB_INSTALL_SPEC, '--install-links'], {
-      shell: false,
+      shell: process.platform === 'win32',
       windowsHide: true,
     });
     let output = '';
