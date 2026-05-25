@@ -757,6 +757,8 @@ function App() {
   const [motionOpen, setMotionOpen] = useState(false);
   const [sendConfirmed, setSendConfirmed] = useState(false);
   const [zConfirmed, setZConfirmed] = useState(false);
+  const [tapToMoveActive, setTapToMoveActive] = useState(false);
+  const [tapToMoveMarker, setTapToMoveMarker] = useState(null);
   const [toolheadFanOn, setToolheadFanOn] = useState(false);
   const [homeBeforeDirectSend] = useState(false);
   const [preserveZZero, setPreserveZZero] = useState(true);
@@ -781,6 +783,7 @@ function App() {
   const activeDrawPath = useRef(null);
   const activeDrawIndex = useRef(null);
   const drawFrame = useRef(null);
+  const tapToMoveMarkerTimeout = useRef(null);
   const autoDiscoveryTried = useRef(false);
   const selectedText = textItems.find((item) => item.id === selectedTextId) || textItems[0];
   const unsupportedChars = useMemo(() => unsupportedTextChars(textItems), [textItems]);
@@ -1154,8 +1157,36 @@ function App() {
     };
   };
 
+  const handleTapToMove = async (point) => {
+    const bounds = getReachableBounds(settings);
+    const clamped = {
+      x: Math.max(bounds.minX, Math.min(bounds.maxX, point.x)),
+      y: Math.max(bounds.minY, Math.min(bounds.maxY, point.y)),
+    };
+    const nozzle = penToNozzlePoint(clamped, settings);
+    setTapToMoveMarker(clamped);
+    if (tapToMoveMarkerTimeout.current) clearTimeout(tapToMoveMarkerTimeout.current);
+    tapToMoveMarkerTimeout.current = setTimeout(() => setTapToMoveMarker(null), 1500);
+    await callPrinterApi('/api/printer/move-absolute', {
+      x: nozzle.x, y: nozzle.y, z: settings.safeZ,
+      feedrate: settings.travelSpeed, confirmed: zConfirmed,
+    });
+  };
+
   const handlePointerDown = (event) => {
     const point = svgPointFromEvent(event);
+    if (tapToMoveActive && printerStatus.connected) {
+      const svg = document.getElementById('build-plate-svg');
+      const ctm = svg.getScreenCTM();
+      if (ctm) {
+        const pt = svg.createSVGPoint();
+        pt.x = event.clientX;
+        pt.y = event.clientY;
+        const svgP = pt.matrixTransform(ctm.inverse());
+        handleTapToMove({ x: svgP.x, y: svgP.y });
+      }
+      return;
+    }
     if (mode === 'draw') {
       activeDrawPath.current = [point];
       setDrawPaths((paths) => {
@@ -1192,6 +1223,7 @@ function App() {
   };
 
   const handlePointerMove = (event) => {
+    if (tapToMoveActive) return;
     const point = svgPointFromEvent(event);
     if (mode === 'draw' && activeDrawPath.current) {
       const path = activeDrawPath.current;
@@ -1245,6 +1277,7 @@ function App() {
   };
 
   const handlePointerUp = () => {
+    if (tapToMoveActive) return;
     dragMode.current = null;
     if (drawFrame.current) {
       cancelAnimationFrame(drawFrame.current);
@@ -1724,6 +1757,10 @@ function App() {
     return () => window.clearInterval(interval);
   }, [playbackPlaying]);
 
+  useEffect(() => {
+    if (!printerStatus.connected) setTapToMoveActive(false);
+  }, [printerStatus.connected]);
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -1975,13 +2012,14 @@ function App() {
           <div className="preview-header">
             <div><h2>Layer Preview</h2><p>{settings.bedWidth} x {settings.bedHeight} mm board, {settings.paperWidth} x {settings.paperHeight} mm paper</p></div>
             <div className="stats">
+              <button className={`preview-clear-button${tapToMoveActive && printerStatus.connected ? ' tap-move-active' : ''}`} onClick={() => setTapToMoveActive((prev) => !prev)} disabled={!printerStatus.connected} title={printerStatus.connected ? 'Click to move toolhead by tapping the bed' : 'Connect a printer to enable'}>Tap to Move</button>
               <button className="danger-action preview-clear-button" onClick={clearEverything}>Clear Everything</button>
               <span>{stats.paths} paths</span>
               <span>{stats.points} points</span>
               <span>{Math.round(stats.distance)} mm</span>
             </div>
           </div>
-          <svg id="build-plate-svg" viewBox={`0 0 ${settings.bedWidth} ${settings.bedHeight}`} className="build-plate" onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerLeave={handlePointerUp}>
+          <svg id="build-plate-svg" viewBox={`0 0 ${settings.bedWidth} ${settings.bedHeight}`} className={`build-plate ${tapToMoveActive && printerStatus.connected ? 'build-plate-tap-active' : ''}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerLeave={handlePointerUp}>
             <defs>
               <linearGradient id="plate-sheen" x1="0" x2="1" y1="0" y2="1">
                 <stop offset="0%" stopColor="#22272a" />
@@ -2050,6 +2088,13 @@ function App() {
               </g>
             ))}
             {(['photos', 'qr'].includes(mode)) && <g transform={`rotate(${object.angle} ${object.x + object.w / 2} ${object.y + object.h / 2})`}><rect x={object.x} y={object.y} width={object.w} height={object.h} fill="none" stroke="#0f766e" strokeWidth="1" strokeDasharray="4 2" /><circle data-handle="resize" cx={object.x + object.w} cy={object.y + object.h} r="4" fill="#0f766e" /><circle data-handle="rotate" cx={object.x + object.w / 2} cy={object.y - 10} r="4" fill="#b45309" /></g>}
+            {tapToMoveMarker && (
+              <g className="tap-move-marker">
+                <circle cx={tapToMoveMarker.x} cy={tapToMoveMarker.y} r="4" fill="none" stroke="#f59e0b" strokeWidth="0.8" />
+                <line x1={tapToMoveMarker.x - 8} y1={tapToMoveMarker.y} x2={tapToMoveMarker.x + 8} y2={tapToMoveMarker.y} stroke="#f59e0b" strokeWidth="0.7" />
+                <line x1={tapToMoveMarker.x} y1={tapToMoveMarker.y - 8} x2={tapToMoveMarker.x} y2={tapToMoveMarker.y + 8} stroke="#f59e0b" strokeWidth="0.7" />
+              </g>
+            )}
           </svg>
         </section>
 

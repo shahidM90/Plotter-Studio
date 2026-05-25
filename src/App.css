@@ -202,6 +202,13 @@ button:hover:not(:disabled),
   font-size: 0.84rem;
 }
 
+.preview-clear-button.tap-move-active {
+  color: #0d0d0d;
+  background: #f59e0b;
+  border-color: #d97706;
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.5);
+}
+
 .feature-list span,
 .stats span {
   border: 1px solid rgba(214, 211, 202, 0.18);
@@ -681,6 +688,14 @@ input[type='range'] {
   border-radius: 8px;
   background: #101416;
   touch-action: none;
+}
+
+.build-plate-tap-active {
+  cursor: crosshair;
+}
+
+.tap-move-marker {
+  pointer-events: none;
 }
 
 .paper-rect-move {

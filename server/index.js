@@ -598,6 +598,32 @@ app.post('/api/printer/jog', async (request, response) => {
   response.json({ ok: true });
 });
 
+app.post('/api/printer/move-absolute', async (request, response) => {
+  if (!requireConnected(response)) return;
+  const { x = 0, y = 0, z = 10, feedrate = 3000, confirmed = false } = request.body;
+  const target = {
+    x: Number(x), y: Number(y), z: Number(z), feedrate: Number(feedrate),
+  };
+  if ([target.x, target.y, target.z, target.feedrate].some((value) => !Number.isFinite(value))) {
+    response.status(400).json({ ok: false, error: 'Move values must be finite numbers.' });
+    return;
+  }
+  if (target.z < 0 && !confirmed) {
+    response.status(400).json({ ok: false, error: 'Negative Z requires confirmation.' });
+    return;
+  }
+
+  const gcode = [
+    'G90',
+    `G0 Z${target.z.toFixed(2)} F${Math.round(target.feedrate)}`,
+    'M400',
+    `G0 X${target.x.toFixed(2)} Y${target.y.toFixed(2)} F${Math.round(target.feedrate)}`,
+  ].join('\n');
+
+  await sendGCode(gcode);
+  response.json({ ok: true });
+});
+
 app.post('/api/printer/set-z-zero', async (request, response) => {
   if (!requireConnected(response)) return;
   const { confirmed = false } = request.body;
