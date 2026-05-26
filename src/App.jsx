@@ -1157,6 +1157,17 @@ function App() {
     };
   };
 
+  const accurateSvgPoint = (event) => {
+    const svg = document.getElementById('build-plate-svg');
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return svgPointFromEvent(event);
+    const pt = svg.createSVGPoint();
+    pt.x = event.clientX;
+    pt.y = event.clientY;
+    const svgP = pt.matrixTransform(ctm.inverse());
+    return { x: svgP.x, y: svgP.y };
+  };
+
   const handleTapToMove = async (point) => {
     const bounds = getReachableBounds(settings);
     const clamped = {
@@ -1195,9 +1206,9 @@ function App() {
       });
       return;
     }
-    if (event.target.dataset.handle === 'paper-resize') {
+    if (event.target.dataset.handle?.startsWith('paper-resize-')) {
       if (!presetMenuOpen) return;
-      dragMode.current = 'paper-resize';
+      dragMode.current = event.target.dataset.handle;
       dragStart.current = { x: point.x, y: point.y, settings };
       return;
     }
@@ -1269,15 +1280,44 @@ function App() {
       })));
       return;
     }
-    if (dragMode.current === 'paper-resize') {
-      const newW = Math.max(10, point.x - start.settings.originX);
-      const newH = Math.max(10, point.y - start.settings.originY);
-      const next = clampPaperToReachableArea({
-        ...start.settings,
-        paperWidth: newW,
-        paperHeight: newH,
-      });
-      setSettings((current) => ({ ...current, paperWidth: next.paperWidth, paperHeight: next.paperHeight, preset: 'custom' }));
+    if (dragMode.current?.startsWith('paper-resize-')) {
+      const p = accurateSvgPoint(event);
+      const s = start.settings;
+      const corner = dragMode.current;
+      let ox = s.originX;
+      let oy = s.originY;
+      let pw = s.paperWidth;
+      let ph = s.paperHeight;
+      const right = s.originX + s.paperWidth;
+      const bottom = s.originY + s.paperHeight;
+
+      if (corner === 'paper-resize-br') {
+        pw = Math.max(10, p.x - ox);
+        ph = Math.max(10, p.y - oy);
+      } else if (corner === 'paper-resize-bl') {
+        pw = Math.max(10, right - p.x);
+        ox = right - pw;
+        ph = Math.max(10, p.y - oy);
+      } else if (corner === 'paper-resize-tr') {
+        ph = Math.max(10, bottom - p.y);
+        oy = bottom - ph;
+        pw = Math.max(10, p.x - ox);
+      } else if (corner === 'paper-resize-tl') {
+        pw = Math.max(10, right - p.x);
+        ph = Math.max(10, bottom - p.y);
+        ox = right - pw;
+        oy = bottom - ph;
+      }
+
+      const next = clampPaperToReachableArea({ ...s, originX: ox, originY: oy, paperWidth: pw, paperHeight: ph });
+      setSettings((current) => ({
+        ...current,
+        originX: next.originX,
+        originY: next.originY,
+        paperWidth: next.paperWidth,
+        paperHeight: next.paperHeight,
+        preset: 'custom',
+      }));
       return;
     }
     const commitObject = (nextObject) => {
@@ -2080,7 +2120,12 @@ function App() {
             ))}
             <rect data-paper="true" x={settings.originX} y={settings.originY} width={settings.paperWidth} height={settings.paperHeight} fill="#fbfbf7" fillOpacity="0.92" stroke="#14b8a6" strokeWidth="0.9" strokeDasharray="3 2" className={presetMenuOpen ? 'paper-rect paper-rect-move' : 'paper-rect'} />
             {presetMenuOpen && (
-              <circle data-handle="paper-resize" cx={settings.originX + settings.paperWidth} cy={settings.originY + settings.paperHeight} r="4.5" fill="#14b8a6" className="paper-resize-handle" />
+              <>
+                <circle data-handle="paper-resize-tl" cx={settings.originX} cy={settings.originY} r="4.5" fill="#14b8a6" className="paper-resize-handle-tl" />
+                <circle data-handle="paper-resize-tr" cx={settings.originX + settings.paperWidth} cy={settings.originY} r="4.5" fill="#14b8a6" className="paper-resize-handle-tr" />
+                <circle data-handle="paper-resize-bl" cx={settings.originX} cy={settings.originY + settings.paperHeight} r="4.5" fill="#14b8a6" className="paper-resize-handle-bl" />
+                <circle data-handle="paper-resize-br" cx={settings.originX + settings.paperWidth} cy={settings.originY + settings.paperHeight} r="4.5" fill="#14b8a6" className="paper-resize-handle-br" />
+              </>
             )}
             {previewUrl && mode === 'photos' && photoMode === 'image' && <image href={previewUrl} x={object.x} y={object.y} width={object.w} height={object.h} opacity="0.16" preserveAspectRatio="xMidYMid meet" />}
             {enabledLayers.length > 0

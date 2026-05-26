@@ -702,9 +702,10 @@ input[type='range'] {
   cursor: move;
 }
 
-.paper-resize-handle {
-  cursor: nwse-resize;
-}
+.paper-resize-handle-tl,
+.paper-resize-handle-br { cursor: nwse-resize; }
+.paper-resize-handle-tr,
+.paper-resize-handle-bl { cursor: nesw-resize; }
 
 .unreachable-zone rect {
   fill: rgba(248, 113, 113, 0.26);
