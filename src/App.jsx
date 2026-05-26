@@ -1195,6 +1195,12 @@ function App() {
       });
       return;
     }
+    if (event.target.dataset.handle === 'paper-resize') {
+      if (!presetMenuOpen) return;
+      dragMode.current = 'paper-resize';
+      dragStart.current = { x: point.x, y: point.y, settings };
+      return;
+    }
     if (event.target.dataset.paper === 'true') {
       if (!presetMenuOpen) return;
       dragMode.current = 'paper';
@@ -1261,6 +1267,17 @@ function App() {
         ...item,
         object: { ...item.object, x: item.object.x + clampedDx, y: item.object.y + clampedDy },
       })));
+      return;
+    }
+    if (dragMode.current === 'paper-resize') {
+      const newW = Math.max(10, point.x - start.settings.originX);
+      const newH = Math.max(10, point.y - start.settings.originY);
+      const next = clampPaperToReachableArea({
+        ...start.settings,
+        paperWidth: newW,
+        paperHeight: newH,
+      });
+      setSettings((current) => ({ ...current, paperWidth: next.paperWidth, paperHeight: next.paperHeight, preset: 'custom' }));
       return;
     }
     const commitObject = (nextObject) => {
@@ -2062,6 +2079,9 @@ function App() {
               <text key={`y-${tick}`} x="9" y={tick + 1.5} fill="#c9d2d5" fontSize="5" textAnchor="middle">{tick}</text>
             ))}
             <rect data-paper="true" x={settings.originX} y={settings.originY} width={settings.paperWidth} height={settings.paperHeight} fill="#fbfbf7" fillOpacity="0.92" stroke="#14b8a6" strokeWidth="0.9" strokeDasharray="3 2" className={presetMenuOpen ? 'paper-rect paper-rect-move' : 'paper-rect'} />
+            {presetMenuOpen && (
+              <circle data-handle="paper-resize" cx={settings.originX + settings.paperWidth} cy={settings.originY + settings.paperHeight} r="4.5" fill="#14b8a6" className="paper-resize-handle" />
+            )}
             {previewUrl && mode === 'photos' && photoMode === 'image' && <image href={previewUrl} x={object.x} y={object.y} width={object.w} height={object.h} opacity="0.16" preserveAspectRatio="xMidYMid meet" />}
             {enabledLayers.length > 0
               ? enabledLayers.map((layer) => layer.paths.map((path, index) => <path key={`${layer.id}-${index}`} d={toPathData(applySettings([path], settings, { mirrorOutput: false })[0])} fill="none" stroke={layer.color} strokeWidth="0.75" strokeLinecap="round" strokeLinejoin="round" />))

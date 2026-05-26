@@ -702,6 +702,10 @@ input[type='range'] {
   cursor: move;
 }
 
+.paper-resize-handle {
+  cursor: nwse-resize;
+}
+
 .unreachable-zone rect {
   fill: rgba(248, 113, 113, 0.26);
   stroke: rgba(248, 113, 113, 0.72);
