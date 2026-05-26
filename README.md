@@ -54,7 +54,6 @@ Plotter Studio is a desktop application for designing, arranging, and plotting p
 ![Calibration](./screenshots/calibration.png)
 ![Printer Controls](./screenshots/printer-controls.png)
 
-> Screenshots are placed in the `screenshots/` directory. Replace the placeholder images with actual screenshots of the application.
 
 ## Install
 
