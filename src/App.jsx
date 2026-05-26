@@ -393,10 +393,12 @@ const makeTextPaths = (text, object, fontKey = DEFAULT_HERSHEY_FONT) => {
 };
 
 const makeCalibrationPaths = (settings) => {
-  const x = settings.originX + settings.penOffsetX;
-  const y = settings.originY + settings.penOffsetY;
   const w = Math.min(50, settings.paperWidth);
   const h = Math.min(50, settings.paperHeight);
+  const cx = settings.bedWidth / 2;
+  const cy = settings.bedHeight / 2;
+  const x = cx - w / 2;
+  const y = cy - h / 2;
   return [
     [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }, { x, y }],
     [{ x, y }, { x: x + w, y: y + h }],
@@ -685,6 +687,101 @@ const makeContourPaths = (settings) => {
   return paths;
 };
 
+const shapeToPaths = (shape) => {
+  const { type, x, y, rotation, radius, width, height, outerRadius, innerRadius } = shape;
+  const segments = 64;
+  if (type === 'circle') {
+    const pts = [];
+    for (let i = 0; i <= segments; i++) {
+      const a = (i / segments) * Math.PI * 2;
+      pts.push({ x: x + Math.cos(a) * radius, y: y + Math.sin(a) * radius });
+    }
+    return [pts];
+  }
+  if (type === 'rect') {
+    const hw = width / 2;
+    const hh = height / 2;
+    const corners = [
+      { x: x - hw, y: y - hh },
+      { x: x + hw, y: y - hh },
+      { x: x + hw, y: y + hh },
+      { x: x - hw, y: y + hh },
+      { x: x - hw, y: y - hh },
+    ];
+    return [rotation ? corners.map((p) => rotatePoint(p.x, p.y, x, y, rotation)) : corners];
+  }
+  if (type === 'star') {
+    const pts = [];
+    const n = 5;
+    for (let i = 0; i < n * 2; i++) {
+      const a = (i * Math.PI) / n - Math.PI / 2;
+      const r = i % 2 === 0 ? outerRadius : innerRadius;
+      pts.push({ x: x + Math.cos(a) * r, y: y + Math.sin(a) * r });
+    }
+    pts.push({ x: pts[0].x, y: pts[0].y });
+    return [rotation ? pts.map((p) => rotatePoint(p.x, p.y, x, y, rotation)) : pts];
+  }
+  if (type === 'line') {
+    const halfLen = (shape.length || 20) / 2;
+    const p1 = { x: x - halfLen, y: y };
+    const p2 = { x: x + halfLen, y: y };
+    if (rotation) {
+      return [[rotatePoint(p1.x, p1.y, x, y, rotation), rotatePoint(p2.x, p2.y, x, y, rotation)]];
+    }
+    return [[p1, p2]];
+  }
+  if (type === 'hexagon') {
+    const r = shape.radius || 12;
+    const pts = [];
+    for (let i = 0; i <= 6; i++) {
+      const a = (i / 6) * Math.PI * 2 - Math.PI / 2;
+      pts.push({ x: x + Math.cos(a) * r, y: y + Math.sin(a) * r });
+    }
+    return [rotation ? pts.map((p) => rotatePoint(p.x, p.y, x, y, rotation)) : pts];
+  }
+  return [];
+};
+
+const shapeBoundingBox = (shape) => {
+  const paths = shapeToPaths(shape);
+  const pts = paths.flat();
+  if (!pts.length) return { x: 0, y: 0, w: 0, h: 0 };
+  const minX = Math.min(...pts.map((p) => p.x));
+  const maxX = Math.max(...pts.map((p) => p.x));
+  const minY = Math.min(...pts.map((p) => p.y));
+  const maxY = Math.max(...pts.map((p) => p.y));
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+};
+
+const computeDragShape = (type, start, pt) => {
+  const dx = pt.x - start.x;
+  const dy = pt.y - start.y;
+  const dist = Math.hypot(dx, dy);
+  if (type === 'circle') {
+    return { type: 'circle', x: start.x, y: start.y, radius: Math.max(1, dist), rotation: 0 };
+  }
+  if (type === 'rect') {
+    const x = Math.min(start.x, pt.x);
+    const y = Math.min(start.y, pt.y);
+    const w = Math.abs(pt.x - start.x);
+    const h = Math.abs(pt.y - start.y);
+    return { type: 'rect', x: x + w / 2, y: y + h / 2, width: Math.max(1, w), height: Math.max(1, h), rotation: 0 };
+  }
+  if (type === 'star') {
+    const r = Math.max(1, dist);
+    return { type: 'star', x: start.x, y: start.y, outerRadius: r, innerRadius: Math.max(0.5, r * 0.47), rotation: 0 };
+  }
+  if (type === 'line') {
+    const len = Math.max(1, dist);
+    const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+    return { type: 'line', x: (start.x + pt.x) / 2, y: (start.y + pt.y) / 2, length: len, rotation: Math.round(angle) };
+  }
+  if (type === 'hexagon') {
+    return { type: 'hexagon', x: start.x, y: start.y, radius: Math.max(1, dist), rotation: 0 };
+  }
+  return null;
+};
+
 const normalizePathsToObjectLocal = (paths) => {
   const points = paths.flat();
   if (!points.length) return [];
@@ -744,6 +841,7 @@ function App() {
     qr: true,
     draw: true,
     generated: true,
+    shapes: true,
   });
   const [settings, setSettings] = useState(() => clampPaperToReachableArea(defaultSettings));
   const [object, setObject] = useState(defaultObject);
@@ -776,9 +874,14 @@ function App() {
   const [playbackOpen, setPlaybackOpen] = useState(false);
   const [playbackPlaying, setPlaybackPlaying] = useState(false);
   const [playbackProgress, setPlaybackProgress] = useState(0);
+  const [shapes, setShapes] = useState([]);
+  const [selectedShapeId, setSelectedShapeId] = useState(null);
+  const [activeTool, setActiveTool] = useState('none');
+  const [tempShape, setTempShape] = useState(null);
   const mqttLastId = useRef(0);
   const mqttLogRef = useRef(null);
   const dragMode = useRef(null);
+  const shapeDragStart = useRef(null);
   const dragStart = useRef({ x: 0, y: 0, object: defaultObject, settings: defaultSettings, textItems: [], textId: null });
   const activeDrawPath = useRef(null);
   const activeDrawIndex = useRef(null);
@@ -821,6 +924,7 @@ function App() {
     if (mode === 'calibrate') return makeCalibrationPaths(settings);
     return [];
   }, [mode, patternType, settings, traceSpacing]);
+  const shapePaths = useMemo(() => shapes.flatMap(shapeToPaths), [shapes]);
   const projectPaths = useMemo(() => cleanPaths([
     ...(objectVisibility.text ? textPaths : []),
     ...(objectVisibility.image ? imagePaths : []),
@@ -828,15 +932,17 @@ function App() {
     ...(objectVisibility.qr ? transformedQrPaths : []),
     ...(objectVisibility.draw ? drawPaths : []),
     ...(objectVisibility.generated ? generatedModePaths : []),
-  ]), [drawPaths, generatedModePaths, imagePaths, objectVisibility, svgPaths, textPaths, transformedQrPaths]);
+    ...(objectVisibility.shapes ? shapePaths : []),
+  ]), [drawPaths, generatedModePaths, imagePaths, objectVisibility, shapePaths, svgPaths, textPaths, transformedQrPaths]);
   const workingPaths = useMemo(() => {
     if (mode === 'text') return textPaths;
     if (mode === 'photos' && photoMode === 'image') return imagePaths;
     if (mode === 'photos' && photoMode === 'svg') return svgPaths;
     if (mode === 'qr') return transformedQrPaths;
     if (mode === 'draw') return cleanPaths(drawPaths);
+    if (mode === 'shapes') return shapePaths;
     return generatedModePaths;
-  }, [drawPaths, generatedModePaths, imagePaths, mode, photoMode, svgPaths, textPaths, transformedQrPaths]);
+  }, [drawPaths, generatedModePaths, imagePaths, mode, photoMode, shapePaths, svgPaths, textPaths, transformedQrPaths]);
 
   const enabledLayerPaths = useMemo(() => layers.filter((layer) => layer.enabled).sort((a, b) => a.order - b.order).flatMap((layer) => layer.paths), [layers]);
   const enabledLayers = useMemo(() => layers.filter((layer) => layer.enabled).sort((a, b) => a.order - b.order), [layers]);
@@ -854,7 +960,8 @@ function App() {
     { key: 'qr', label: 'QR', count: transformedQrPaths.length },
     { key: 'draw', label: 'Drawing', count: drawPaths.length },
     { key: 'generated', label: 'Generated', count: generatedModePaths.length },
-  ], [drawPaths.length, generatedModePaths.length, imagePaths.length, svgPaths.length, textPaths.length, transformedQrPaths.length]);
+    { key: 'shapes', label: 'Shapes', count: shapes.length },
+  ], [drawPaths.length, generatedModePaths.length, imagePaths.length, shapes.length, svgPaths.length, textPaths.length, transformedQrPaths.length]);
   const playbackSourcePaths = useMemo(() => orderPathsForExport(applySettings(exportSourcePaths, settings, { mirrorOutput: false }), { preserveOrder: mode === 'text' }), [exportSourcePaths, mode, settings]);
   const playbackPreviewPaths = useMemo(() => playbackPathsAtProgress(playbackSourcePaths, playbackProgress), [playbackSourcePaths, playbackProgress]);
 
@@ -1179,7 +1286,7 @@ function App() {
     if (tapToMoveMarkerTimeout.current) clearTimeout(tapToMoveMarkerTimeout.current);
     tapToMoveMarkerTimeout.current = setTimeout(() => setTapToMoveMarker(null), 1500);
     await callPrinterApi('/api/printer/move-absolute', {
-      x: nozzle.x, y: nozzle.y, z: settings.safeZ,
+      x: nozzle.x, y: nozzle.y, z: 1,
       feedrate: settings.travelSpeed, confirmed: zConfirmed,
     });
   };
@@ -1199,10 +1306,11 @@ function App() {
       return;
     }
     if (mode === 'draw') {
-      activeDrawPath.current = [point];
+      const pt = accurateSvgPoint(event);
+      activeDrawPath.current = [pt];
       setDrawPaths((paths) => {
         activeDrawIndex.current = paths.length;
-        return [...paths, [point]];
+        return [...paths, [pt]];
       });
       return;
     }
@@ -1210,6 +1318,23 @@ function App() {
       if (!presetMenuOpen) return;
       dragMode.current = event.target.dataset.handle;
       dragStart.current = { x: point.x, y: point.y, settings };
+      return;
+    }
+    const shapeId = event.target.dataset.shapeId;
+    if (shapeId && mode === 'shapes' && activeTool === 'none') {
+      setSelectedShapeId(shapeId);
+      const shape = shapes.find((s) => s.id === shapeId);
+      if (!shape) return;
+      if (event.target.dataset.handle === 'shape-rotate') dragMode.current = 'shape-rotate';
+      else if (event.target.dataset.handle?.startsWith('shape-scale-')) dragMode.current = event.target.dataset.handle;
+      else dragMode.current = 'shape-move';
+      dragStart.current = { x: point.x, y: point.y, shape: { ...shape } };
+      return;
+    }
+    if (mode === 'shapes' && activeTool !== 'none') {
+      const pt = accurateSvgPoint(event);
+      shapeDragStart.current = { x: pt.x, y: pt.y };
+      dragMode.current = 'shape-create';
       return;
     }
     if (event.target.dataset.paper === 'true') {
@@ -1243,10 +1368,11 @@ function App() {
     if (tapToMoveActive) return;
     const point = svgPointFromEvent(event);
     if (mode === 'draw' && activeDrawPath.current) {
+      const pt = accurateSvgPoint(event);
       const path = activeDrawPath.current;
       const previous = path[path.length - 1];
-      if (!previous || distance(previous, point) < DRAW_MIN_DISTANCE_MM || path.length >= DRAW_MAX_POINTS_PER_STROKE) return;
-      path.push(point);
+      if (!previous || distance(previous, pt) < DRAW_MIN_DISTANCE_MM || path.length >= DRAW_MAX_POINTS_PER_STROKE) return;
+      path.push(pt);
       if (drawFrame.current) return;
       drawFrame.current = requestAnimationFrame(() => {
         drawFrame.current = null;
@@ -1257,6 +1383,11 @@ function App() {
           return next;
         });
       });
+      return;
+    }
+    if (dragMode.current === 'shape-create') {
+      const pt = accurateSvgPoint(event);
+      setTempShape(computeDragShape(activeTool, shapeDragStart.current, pt));
       return;
     }
     if (!dragMode.current) return;
@@ -1316,8 +1447,55 @@ function App() {
         originY: next.originY,
         paperWidth: next.paperWidth,
         paperHeight: next.paperHeight,
-        preset: 'custom',
       }));
+      return;
+    }
+    if (dragMode.current === 'shape-move') {
+      const pt = accurateSvgPoint(event);
+      setShapes((current) => current.map((s) => s.id === start.shape.id ? { ...s, x: start.shape.x + pt.x - start.x, y: start.shape.y + pt.y - start.y } : s));
+      return;
+    }
+    if (dragMode.current?.startsWith('shape-scale-')) {
+      const pt = accurateSvgPoint(event);
+      const shape = start.shape;
+      const bb = shapeBoundingBox(start.shape);
+      const corner = dragMode.current;
+
+      if (shape.type === 'circle' || shape.type === 'hexagon') {
+        const d = Math.hypot(pt.x - shape.x, pt.y - shape.y);
+        setShapes((c) => c.map((s) => s.id === shape.id ? { ...s, radius: Math.max(3, d) } : s));
+      } else if (shape.type === 'rect') {
+        let nw, nh, nx, ny;
+        if (corner === 'shape-scale-br') {
+          nw = Math.max(5, pt.x - bb.x); nh = Math.max(5, pt.y - bb.y);
+          nx = bb.x + nw / 2; ny = bb.y + nh / 2;
+        } else if (corner === 'shape-scale-tl') {
+          nw = Math.max(5, (bb.x + bb.w) - pt.x); nh = Math.max(5, (bb.y + bb.h) - pt.y);
+          nx = pt.x + nw / 2; ny = pt.y + nh / 2;
+        } else if (corner === 'shape-scale-tr') {
+          nw = Math.max(5, pt.x - bb.x); nh = Math.max(5, (bb.y + bb.h) - pt.y);
+          nx = bb.x + nw / 2; ny = pt.y + nh / 2;
+        } else {
+          nw = Math.max(5, (bb.x + bb.w) - pt.x); nh = Math.max(5, pt.y - bb.y);
+          nx = pt.x + nw / 2; ny = bb.y + nh / 2;
+        }
+        setShapes((c) => c.map((s) => s.id === shape.id ? { ...s, x: nx, y: ny, width: nw, height: nh } : s));
+      } else if (shape.type === 'star') {
+        const d = Math.hypot(pt.x - shape.x, pt.y - shape.y);
+        const ratio = (shape.innerRadius || 7) / (shape.outerRadius || 15);
+        setShapes((c) => c.map((s) => s.id === shape.id ? { ...s, outerRadius: Math.max(5, d), innerRadius: Math.max(2, d * ratio) } : s));
+      } else if (shape.type === 'line') {
+        const a = Math.atan2(pt.y - shape.y, pt.x - shape.x) * (180 / Math.PI);
+        const len = Math.hypot(pt.x - shape.x, pt.y - shape.y) * 2;
+        setShapes((c) => c.map((s) => s.id === shape.id ? { ...s, length: Math.max(5, len), rotation: Math.round(a) } : s));
+      }
+      return;
+    }
+    if (dragMode.current === 'shape-rotate') {
+      const pt = accurateSvgPoint(event);
+      const shape = start.shape;
+      const angle = Math.atan2(pt.y - shape.y, pt.x - shape.x) * (180 / Math.PI) + 90;
+      setShapes((current) => current.map((s) => s.id === shape.id ? { ...s, rotation: Math.round(angle) } : s));
       return;
     }
     const commitObject = (nextObject) => {
@@ -1333,8 +1511,23 @@ function App() {
     }
   };
 
-  const handlePointerUp = () => {
+  const handlePointerUp = (event) => {
     if (tapToMoveActive) return;
+    if (dragMode.current === 'shape-create') {
+      const start = shapeDragStart.current;
+      const pt = event ? accurateSvgPoint(event) : start;
+      const shape = computeDragShape(activeTool, start, pt);
+      if (shape) {
+        shape.id = crypto.randomUUID();
+        setShapes((current) => [...current, shape]);
+        setSelectedShapeId(shape.id);
+      }
+      setTempShape(null);
+      setActiveTool('none');
+      dragMode.current = null;
+      shapeDragStart.current = null;
+      return;
+    }
     dragMode.current = null;
     if (drawFrame.current) {
       cancelAnimationFrame(drawFrame.current);
@@ -1380,8 +1573,12 @@ function App() {
     setSvgFillPaths([]);
     setQrPaths([]);
     setDrawPaths([]);
+    setShapes([]);
+    setSelectedShapeId(null);
+    setTempShape(null);
+    setActiveTool('none');
     setLayers([]);
-    setObjectVisibility({ text: true, image: true, svg: true, qr: true, draw: true, generated: true });
+    setObjectVisibility({ text: true, image: true, svg: true, qr: true, draw: true, generated: true, shapes: true });
     setPreparedJob(null);
     setPreflightMessage('');
   };
@@ -1404,6 +1601,7 @@ function App() {
     }
     if (key === 'qr') setQrPaths([]);
     if (key === 'draw') setDrawPaths([]);
+    if (key === 'shapes') { setShapes([]); setSelectedShapeId(null); setTempShape(null); setActiveTool('none'); }
     if (key === 'generated') setMode('text');
     setPreparedJob(null);
     setPreflightMessage('');
@@ -1844,10 +2042,10 @@ function App() {
               <div className="preset-popover">
                 <label><span>Printer</span><select value={settings.preset} onChange={(event) => handlePresetChange(event.target.value)}>{Object.entries(PRESETS).map(([key, preset]) => <option key={key} value={key}>{preset.label}</option>)}</select></label>
                 <div className="settings-grid compact">
-                  <NumberInput label="Bed W" value={settings.bedWidth} onChange={(value) => handleSettingChange('bedWidth', value)} />
-                  <NumberInput label="Bed H" value={settings.bedHeight} onChange={(value) => handleSettingChange('bedHeight', value)} />
-                  <NumberInput label="Paper W" value={settings.paperWidth} onChange={(value) => handleSettingChange('paperWidth', value)} />
-                  <NumberInput label="Paper H" value={settings.paperHeight} onChange={(value) => handleSettingChange('paperHeight', value)} />
+                  <NumberInput label="Bed W" value={formatBedSize(settings.bedWidth)} onChange={(value) => handleSettingChange('bedWidth', value)} />
+                  <NumberInput label="Bed H" value={formatBedSize(settings.bedHeight)} onChange={(value) => handleSettingChange('bedHeight', value)} />
+                  <NumberInput label="Paper W" value={formatMM(settings.paperWidth)} onChange={(value) => handleSettingChange('paperWidth', value)} />
+                  <NumberInput label="Paper H" value={formatMM(settings.paperHeight)} onChange={(value) => handleSettingChange('paperHeight', value)} />
                 </div>
               </div>
             )}
@@ -1941,7 +2139,7 @@ function App() {
       <section className="workspace">
         <aside className="panel controls-panel">
           <div className="mode-tabs">
-            {['text', 'photos', 'qr', 'patterns', 'draw', 'calibrate'].map((item) => (
+            {['text', 'photos', 'qr', 'patterns', 'draw', 'calibrate', 'shapes'].map((item) => (
               <button key={item} className={mode === item ? 'active' : ''} onClick={() => setMode(item)}>{item}</button>
             ))}
           </div>
@@ -1968,10 +2166,10 @@ function App() {
                 </select>
               </label>
               <div className="settings-grid compact">
-                <NumberInput label="X" value={selectedText?.object.x || 0} onChange={(value) => updateTextObject(selectedText.id, { ...selectedText.object, x: value })} />
-                <NumberInput label="Y" value={selectedText?.object.y || 0} onChange={(value) => updateTextObject(selectedText.id, { ...selectedText.object, y: value })} />
-                <NumberInput label="W" value={selectedText?.object.w || 0} onChange={(value) => updateTextObject(selectedText.id, { ...selectedText.object, w: value })} />
-                <NumberInput label="H" value={selectedText?.object.h || 0} onChange={(value) => updateTextObject(selectedText.id, { ...selectedText.object, h: value })} />
+                <NumberInput label="X" value={formatMM(selectedText?.object.x || 0)} onChange={(value) => updateTextObject(selectedText.id, { ...selectedText.object, x: value })} />
+                <NumberInput label="Y" value={formatMM(selectedText?.object.y || 0)} onChange={(value) => updateTextObject(selectedText.id, { ...selectedText.object, y: value })} />
+                <NumberInput label="W" value={formatMM(selectedText?.object.w || 0)} onChange={(value) => updateTextObject(selectedText.id, { ...selectedText.object, w: value })} />
+                <NumberInput label="H" value={formatMM(selectedText?.object.h || 0)} onChange={(value) => updateTextObject(selectedText.id, { ...selectedText.object, h: value })} />
                 <NumberInput label="Angle" value={Math.round(selectedText?.object.angle || 0)} onChange={(value) => updateTextObject(selectedText.id, { ...selectedText.object, angle: value })} />
               </div>
               {unsupportedChars.length > 0 && (
@@ -2048,6 +2246,62 @@ function App() {
           {mode === 'draw' && <div className="control-group"><h2>Freehand</h2><p className="muted">Draw directly on the preview. Strokes are simplified as you draw to keep the app responsive.</p><button onClick={clearDrawing}>Clear drawing</button></div>}
           {mode === 'calibrate' && <div className="control-group"><h2>Calibration + Offset</h2><p className="muted">Exports a 50 mm square, diagonals, center lines, and an offset crosshair.</p></div>}
 
+          {mode === 'shapes' && (
+            <div className="control-group">
+              <h2>Shapes</h2>
+              <p className="muted">Select to edit. Use tools above to add shapes.</p>
+              <div className="shape-tool-palette">
+                <button className={activeTool === 'circle' ? 'active' : ''} onClick={() => setActiveTool(activeTool === 'circle' ? 'none' : 'circle')} title="Circle">
+                  <svg viewBox="0 0 20 20" width="20" height="20"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" strokeWidth="1.5"/></svg>
+                </button>
+                <button className={activeTool === 'rect' ? 'active' : ''} onClick={() => setActiveTool(activeTool === 'rect' ? 'none' : 'rect')} title="Rectangle">
+                  <svg viewBox="0 0 20 20" width="20" height="20"><rect x="3" y="4" width="14" height="12" fill="none" stroke="currentColor" strokeWidth="1.5" rx="1"/></svg>
+                </button>
+                <button className={activeTool === 'star' ? 'active' : ''} onClick={() => setActiveTool(activeTool === 'star' ? 'none' : 'star')} title="Star">
+                  <svg viewBox="0 0 20 20" width="20" height="20"><polygon points="10,1.5 12.6,7.2 19,7.8 14.3,12 15.6,18.5 10,15.2 4.4,18.5 5.7,12 1,7.8 7.4,7.2" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/></svg>
+                </button>
+                <button className={activeTool === 'line' ? 'active' : ''} onClick={() => setActiveTool(activeTool === 'line' ? 'none' : 'line')} title="Line">
+                  <svg viewBox="0 0 20 20" width="20" height="20"><line x1="2" y1="18" x2="18" y2="2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                </button>
+                <button className={activeTool === 'hexagon' ? 'active' : ''} onClick={() => setActiveTool(activeTool === 'hexagon' ? 'none' : 'hexagon')} title="Hexagon">
+                  <svg viewBox="0 0 20 20" width="20" height="20"><polygon points="10,2 17.5,6.5 17.5,15.5 10,20 2.5,15.5 2.5,6.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/></svg>
+                </button>
+              </div>
+              {selectedShapeId && (() => {
+                const sel = shapes.find((s) => s.id === selectedShapeId);
+                if (!sel) return null;
+                return (
+                  <>
+                    <div className="settings-grid compact">
+                      <NumberInput label="X" value={Math.round(sel.x)} onChange={(v) => setShapes((current) => current.map((s) => s.id === sel.id ? { ...s, x: v } : s))} />
+                      <NumberInput label="Y" value={Math.round(sel.y)} onChange={(v) => setShapes((current) => current.map((s) => s.id === sel.id ? { ...s, y: v } : s))} />
+                      <NumberInput label="Rotation" value={Math.round(sel.rotation)} onChange={(v) => setShapes((current) => current.map((s) => s.id === sel.id ? { ...s, rotation: v } : s))} />
+                    </div>
+                    {sel.type === 'circle' && <NumberInput label="Radius" value={formatMM(sel.radius)} onChange={(v) => setShapes((current) => current.map((s) => s.id === sel.id ? { ...s, radius: v } : s))} step="1" />}
+                    {sel.type === 'rect' && (
+                      <div className="settings-grid compact">
+                        <NumberInput label="Width" value={formatMM(sel.width)} onChange={(v) => setShapes((current) => current.map((s) => s.id === sel.id ? { ...s, width: v } : s))} step="1" />
+                        <NumberInput label="Height" value={formatMM(sel.height)} onChange={(v) => setShapes((current) => current.map((s) => s.id === sel.id ? { ...s, height: v } : s))} step="1" />
+                      </div>
+                    )}
+                    {sel.type === 'star' && (
+                      <div className="settings-grid compact">
+                        <NumberInput label="Outer R" value={formatMM(sel.outerRadius)} onChange={(v) => setShapes((current) => current.map((s) => s.id === sel.id ? { ...s, outerRadius: v } : s))} step="1" />
+                        <NumberInput label="Inner R" value={formatMM(sel.innerRadius)} onChange={(v) => setShapes((current) => current.map((s) => s.id === sel.id ? { ...s, innerRadius: v } : s))} step="1" />
+                      </div>
+                    )}
+                    {sel.type === 'line' && <NumberInput label="Length" value={Math.round(sel.length || 20)} onChange={(v) => setShapes((c) => c.map((s) => s.id === sel.id ? { ...s, length: v } : s))} />}
+                    {sel.type === 'hexagon' && <NumberInput label="Radius" value={formatMM(sel.radius)} onChange={(v) => setShapes((current) => current.map((s) => s.id === sel.id ? { ...s, radius: v } : s))} step="1" />}
+                    <button className="danger-action" onClick={() => {
+                      setShapes((current) => current.filter((s) => s.id !== selectedShapeId));
+                      setSelectedShapeId(null);
+                    }}>Delete Shape</button>
+                  </>
+                );
+              })()}
+            </div>
+          )}
+
           <div className="control-group objects-control">
             <h2>Objects</h2>
             <div className="object-list">
@@ -2067,7 +2321,7 @@ function App() {
 
         <section className="preview-panel">
           <div className="preview-header">
-            <div><h2>Layer Preview</h2><p>{settings.bedWidth} x {settings.bedHeight} mm board, {settings.paperWidth} x {settings.paperHeight} mm paper</p></div>
+            <div><h2>Layer Preview</h2><p>{formatBedSize(settings.bedWidth)} x {formatBedSize(settings.bedHeight)} mm board, {formatMM(settings.paperWidth)} x {formatMM(settings.paperHeight)} mm paper</p></div>
             <div className="stats">
               <button className={`preview-clear-button${tapToMoveActive && printerStatus.connected ? ' tap-move-active' : ''}`} onClick={() => setTapToMoveActive((prev) => !prev)} disabled={!printerStatus.connected} title={printerStatus.connected ? 'Click to move toolhead by tapping the bed' : 'Connect a printer to enable'}>Tap to Move</button>
               <button className="danger-action preview-clear-button" onClick={clearEverything}>Clear Everything</button>
@@ -2076,7 +2330,7 @@ function App() {
               <span>{Math.round(stats.distance)} mm</span>
             </div>
           </div>
-          <svg id="build-plate-svg" viewBox={`0 0 ${settings.bedWidth} ${settings.bedHeight}`} className={`build-plate ${tapToMoveActive && printerStatus.connected ? 'build-plate-tap-active' : ''}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerLeave={handlePointerUp}>
+          <svg id="build-plate-svg" viewBox={`0 0 ${settings.bedWidth} ${settings.bedHeight}`} className={`build-plate ${tapToMoveActive && printerStatus.connected ? 'build-plate-tap-active' : ''} ${mode === 'shapes' && activeTool !== 'none' ? 'build-plate-shape-place' : ''}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerLeave={handlePointerUp}>
             <defs>
               <linearGradient id="plate-sheen" x1="0" x2="1" y1="0" y2="1">
                 <stop offset="0%" stopColor="#22272a" />
@@ -2153,12 +2407,53 @@ function App() {
               </g>
             ))}
             {(['photos', 'qr'].includes(mode)) && <g transform={`rotate(${object.angle} ${object.x + object.w / 2} ${object.y + object.h / 2})`}><rect x={object.x} y={object.y} width={object.w} height={object.h} fill="none" stroke="#0f766e" strokeWidth="1" strokeDasharray="4 2" /><circle data-handle="resize" cx={object.x + object.w} cy={object.y + object.h} r="4" fill="#0f766e" /><circle data-handle="rotate" cx={object.x + object.w / 2} cy={object.y - 10} r="4" fill="#b45309" /></g>}
+            {mode === 'shapes' && shapes.map((shape) => {
+              const isSelected = shape.id === selectedShapeId;
+              const paths = shapeToPaths(shape);
+              const bb = shapeBoundingBox(shape);
+              return (
+                <g key={shape.id}>
+                  {paths.map((path, i) => (
+                    <path key={i} d={toPathData(path)} fill="none" stroke={isSelected ? '#b45309' : '#0f766e'} strokeWidth={isSelected ? '0.9' : '0.75'} strokeLinecap="round" strokeLinejoin="round" />
+                  ))}
+                  {isSelected && (
+                    <>
+                      <rect data-shape-id={shape.id} x={bb.x} y={bb.y} width={bb.w} height={bb.h} fill="transparent" className="shape-drag-body" />
+                      <rect x={bb.x} y={bb.y} width={bb.w} height={bb.h} fill="none" stroke="#b45309" strokeWidth="0.6" strokeDasharray="2 2" />
+                      <circle data-shape-id={shape.id} data-handle="shape-scale-tl" cx={bb.x} cy={bb.y} r="3.5" fill="#14b8a6" className="shape-scale-handle-tl" />
+                      <circle data-shape-id={shape.id} data-handle="shape-scale-tr" cx={bb.x + bb.w} cy={bb.y} r="3.5" fill="#14b8a6" className="shape-scale-handle-tr" />
+                      <circle data-shape-id={shape.id} data-handle="shape-scale-bl" cx={bb.x} cy={bb.y + bb.h} r="3.5" fill="#14b8a6" className="shape-scale-handle-bl" />
+                      <circle data-shape-id={shape.id} data-handle="shape-scale-br" cx={bb.x + bb.w} cy={bb.y + bb.h} r="3.5" fill="#14b8a6" className="shape-scale-handle-br" />
+                      <circle data-shape-id={shape.id} data-handle="shape-rotate" cx={shape.x} cy={bb.y - 10} r="4" fill="#b45309" />
+                    </>
+                  )}
+                  {!isSelected && (
+                    <rect data-shape-id={shape.id} x={bb.x} y={bb.y} width={bb.w} height={bb.h} fill="transparent" />
+                  )}
+                </g>
+              );
+            })}
+            {mode === 'shapes' && tempShape && (() => {
+              const paths = shapeToPaths(tempShape);
+              const bb = shapeBoundingBox(tempShape);
+              return (
+                <g opacity="0.7" style={{ pointerEvents: 'none' }}>
+                  {paths.map((path, i) => (
+                    <path key={i} d={toPathData(path)} fill="none" stroke="#67e8f9" strokeWidth="0.9" strokeDasharray="3 2" strokeLinecap="round" strokeLinejoin="round" />
+                  ))}
+                  <rect x={bb.x} y={bb.y} width={bb.w} height={bb.h} fill="none" stroke="#67e8f9" strokeWidth="0.5" strokeDasharray="2 2" />
+                </g>
+              );
+            })()}
             {tapToMoveMarker && (
               <g className="tap-move-marker">
                 <circle cx={tapToMoveMarker.x} cy={tapToMoveMarker.y} r="4" fill="none" stroke="#f59e0b" strokeWidth="0.8" />
                 <line x1={tapToMoveMarker.x - 8} y1={tapToMoveMarker.y} x2={tapToMoveMarker.x + 8} y2={tapToMoveMarker.y} stroke="#f59e0b" strokeWidth="0.7" />
                 <line x1={tapToMoveMarker.x} y1={tapToMoveMarker.y - 8} x2={tapToMoveMarker.x} y2={tapToMoveMarker.y + 8} stroke="#f59e0b" strokeWidth="0.7" />
               </g>
+            )}
+            {mode === 'shapes' && activeTool !== 'none' && (
+              <rect x="0" y="0" width={settings.bedWidth} height={settings.bedHeight} fill="transparent" style={{ pointerEvents: 'all' }} />
             )}
           </svg>
         </section>
@@ -2240,14 +2535,14 @@ function App() {
                   <NumberInput label="Safe Z" step="0.1" value={settings.safeZ} onChange={(value) => handleSettingChange('safeZ', value)} />
                   <NumberInput label="Feedrate" value={settings.feedrate} onChange={(value) => handleSettingChange('feedrate', value)} />
                   <NumberInput label="Travel" value={settings.travelSpeed} onChange={(value) => handleSettingChange('travelSpeed', value)} />
-                  <NumberInput label="Origin X" value={settings.originX} onChange={(value) => handleSettingChange('originX', value)} />
-                  <NumberInput label="Origin Y" value={settings.originY} onChange={(value) => handleSettingChange('originY', value)} />
+                  <NumberInput label="Origin X" value={formatBedSize(settings.originX)} onChange={(value) => handleSettingChange('originX', value)} />
+                  <NumberInput label="Origin Y" value={formatBedSize(settings.originY)} onChange={(value) => handleSettingChange('originY', value)} />
                   <NumberInput label="Tip off X" step="0.1" value={settings.penTipOffsetX} onChange={(value) => handleSettingChange('penTipOffsetX', value)} />
                   <NumberInput label="Tip off Y" step="0.1" value={settings.penTipOffsetY} onChange={(value) => handleSettingChange('penTipOffsetY', value)} />
                   <NumberInput label="Fine off X" step="0.1" value={settings.penOffsetX} onChange={(value) => handleSettingChange('penOffsetX', value)} />
                   <NumberInput label="Fine off Y" step="0.1" value={settings.penOffsetY} onChange={(value) => handleSettingChange('penOffsetY', value)} />
-                  <NumberInput label="Park X" value={settings.parkX} onChange={(value) => handleSettingChange('parkX', value)} />
-                  <NumberInput label="Park Y" value={settings.parkY} onChange={(value) => handleSettingChange('parkY', value)} />
+                  <NumberInput label="Park X" value={formatBedSize(settings.parkX)} onChange={(value) => handleSettingChange('parkX', value)} />
+                  <NumberInput label="Park Y" value={formatBedSize(settings.parkY)} onChange={(value) => handleSettingChange('parkY', value)} />
                 </div>
                 <label className="toggle-row"><input type="checkbox" checked={settings.homeBeforePlot} onChange={(event) => handleSettingChange('homeBeforePlot', event.target.checked)} /><span>Home before plot</span></label>
                 <label className="toggle-row"><input type="checkbox" checked={settings.mirrorOutputX} onChange={(event) => handleSettingChange('mirrorOutputX', event.target.checked)} /><span>Fix left-right flip</span></label>
@@ -2277,6 +2572,13 @@ function App() {
     </main>
   );
 }
+
+const formatMM = (v) => {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return v;
+  return Number(v.toFixed(2));
+};
+
+const formatBedSize = (v) => Math.round(v);
 
 function NumberInput({ label, value, onChange, step = 1 }) {
   return <label><span>{label}</span><input type="number" step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} /></label>;

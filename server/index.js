@@ -734,9 +734,26 @@ function restartAfterUpdate() {
   setTimeout(() => process.exit(0), 500);
 }
 
-app.listen(PORT, HOST, () => {
-  const url = `http://${HOST}:${PORT}`;
-  console.log(`Plotter Studio server listening at ${url}`);
-  if (existsSync(STATIC_DIR)) console.log(`Serving web app from ${STATIC_DIR}`);
-  if (SHOULD_OPEN_BROWSER) openBrowser(url);
-});
+function startServer(port = PORT, host = HOST, { openBrowser: shouldOpen } = {}) {
+  return new Promise((resolve) => {
+    const server = app.listen(port, host, () => {
+      const url = `http://${host}:${port}`;
+      console.log(`Plotter Studio server listening at ${url}`);
+      if (existsSync(STATIC_DIR)) console.log(`Serving app from ${STATIC_DIR}`);
+      if (shouldOpen || SHOULD_OPEN_BROWSER) openBrowser(url);
+      resolve(server);
+    });
+  });
+}
+
+export { app, startServer };
+
+const isDirectRun = process.argv[1] && (
+  process.argv[1].endsWith(path.sep + 'index.js') ||
+  process.argv[1].endsWith(path.sep + 'plotterstudio.js') ||
+  process.argv[1].endsWith('plotterstudio')
+);
+
+if (isDirectRun) {
+  startServer(PORT, HOST, { openBrowser: SHOULD_OPEN_BROWSER });
+}

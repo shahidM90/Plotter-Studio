@@ -1,8 +1,9 @@
 {
   "name": "plotter-studio",
-  "version": "0.1.6",
-  "description": "Browser-based pen plotter G-code generator and Bambu Lab printer controller.",
+  "version": "1.0.0",
+  "description": "Desktop pen plotter G-code generator and Bambu Lab printer controller.",
   "type": "module",
+  "main": "electron/main.js",
   "bin": {
     "plotterstudio": "bin/plotterstudio.js",
     "plotter-studio": "bin/plotterstudio.js"
@@ -24,7 +25,11 @@
     "start": "node bin/plotterstudio.js server",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "electron:dev": "concurrently --names vite,electron \"npm run dev\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "electron:build": "npm run build && electron-builder",
+    "electron:start": "npm run build && electron .",
+    "dist": "npm run build && electron-builder"
   },
   "dependencies": {
     "basic-ftp": "^6.0.1",
@@ -41,10 +46,60 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^42.2.0",
+    "electron-builder": "^26.8.1",
     "eslint": "^10.2.1",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.5.0",
-    "vite": "^8.0.10"
+    "vite": "^8.0.10",
+    "wait-on": "^9.0.10"
+  },
+  "build": {
+    "appId": "com.plotterstudio.app",
+    "productName": "Plotter Studio",
+    "artifactName": "${productName} Setup.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "server/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/icon-256.png",
+        "to": "icon.png"
+      }
+    ],
+    "asar": false,
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon-512.png",
+      "requestedExecutionLevel": "asInvoker",
+      "signAndEditExecutable": false,
+      "verifyUpdateCodeSignature": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
+      "shortcutName": "Plotter Studio",
+      "uninstallDisplayName": "Plotter Studio ${version}"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "build/icon.png"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "build/icon.png"
+    }
   }
 }

@@ -19,7 +19,7 @@ Usage:
   plotter-studio server [--port 5426] [--no-open]
 
 Commands:
-  server    Start the local printer backend and web app.
+  server    Start the local printer backend and desktop app.
 `);
 }
 
@@ -43,7 +43,12 @@ process.env.PLOTTER_OPEN_BROWSER = args.has('--no-open') ? '0' : '1';
 process.env.PLOTTER_STATIC_DIR = path.join(rootDir, 'dist');
 
 if (!existsSync(process.env.PLOTTER_STATIC_DIR)) {
-  console.warn('Built web app was not found. Run `npm run build` before starting the release server.');
+  console.warn('Built app was not found. Run `npm run build` before starting the release server.');
 }
 
-await import('../server/index.js');
+const { startServer } = await import('../server/index.js');
+await startServer(
+  Number(process.env.PLOTTER_SERVER_PORT || 5426),
+  process.env.PLOTTER_SERVER_HOST || '127.0.0.1',
+  { openBrowser: process.env.PLOTTER_OPEN_BROWSER === '1' },
+);
