@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Project-local Claude config (keep on disk, not in repo)
+CLAUDE.md
+
 # Electron build output
 release/
 
